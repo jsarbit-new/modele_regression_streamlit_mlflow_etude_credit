@@ -1,0 +1,28 @@
+# Dossiers à ignorer
+input/
+data/
+mlruns_custom_location/
+Archives/
+
+# Fichiers Python à ignorer (anciennes versions ou tests)
+nouv_reg_logistique.py
+nou_reg_SVM.py
+
+# Fichiers d'images générés
+prob_distribution.png
+roc_curve.png
+precision_recall_curve.png
+
+# Fichiers et dossiers généraux à ignorer (bonnes pratiques)
+# Environnements virtuels
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# MLflow local (si différent de mlruns_custom_location)
+mlruns/
+
+# Fichiers spécifiques au système d'exploitation
+.DS_Store
+Thumbs.db
