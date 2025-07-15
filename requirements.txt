@@ -4,4 +4,4 @@ numpy
 scikit-learn
 mlflow
 shap
-evidently
+evidently==0.2.8
