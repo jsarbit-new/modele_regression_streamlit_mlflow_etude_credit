@@ -1,0 +1,121 @@
+artifact_path: logistic_regression_model
+flavors:
+  python_function:
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.sklearn
+    model_path: model.pkl
+    predict_fn: predict
+    python_version: 3.12.3
+  sklearn:
+    code: null
+    pickled_model: model.pkl
+    serialization_format: cloudpickle
+    sklearn_version: 1.6.1
+is_signature_from_type_hint: false
+metadata:
+  all_training_features: '["app_feature_0", "app_feature_1", "app_feature_2", "app_feature_3",
+    "app_feature_4", "app_feature_5", "app_feature_6", "app_feature_7", "app_feature_8",
+    "app_feature_9", "app_feature_10", "app_feature_11", "app_feature_12", "app_feature_13",
+    "app_feature_14", "app_feature_15", "app_feature_16", "app_feature_17", "app_feature_18",
+    "app_feature_19", "app_feature_20", "app_feature_21", "app_feature_22", "app_feature_23",
+    "app_feature_24", "app_feature_25", "app_feature_26", "app_feature_27", "app_feature_28",
+    "app_feature_29", "app_feature_30", "app_feature_31", "app_feature_32", "app_feature_33",
+    "app_feature_34", "app_feature_35", "app_feature_36", "app_feature_37", "app_feature_38",
+    "app_feature_39", "app_feature_40", "app_feature_41", "app_feature_42", "app_feature_43",
+    "app_feature_44", "app_feature_45", "app_feature_46", "app_feature_47", "app_feature_48",
+    "app_feature_49", "bureau_feat_0", "bureau_feat_1", "bureau_feat_2", "bureau_feat_3",
+    "bureau_feat_4", "prev_app_feat_0", "prev_app_feat_1", "prev_app_feat_2", "prev_app_feat_3",
+    "prev_app_feat_4", "pos_feat_0", "pos_feat_1", "pos_feat_2", "pos_feat_3", "pos_feat_4",
+    "install_feat_0", "install_feat_1", "install_feat_2", "install_feat_3", "install_feat_4",
+    "cc_feat_0", "cc_feat_1", "cc_feat_2", "cc_feat_3", "cc_feat_4", "NAME_CONTRACT_TYPE",
+    "CODE_GENDER", "FLAG_OWN_CAR", "NAME_INCOME_TYPE"]'
+  features_info_for_streamlit: '{"app_feature_15": {"display_name": "Ratio Cr\u00e9dit/Annuit\u00e9",
+    "min_val": 0.01, "max_val": 10.0}, "app_feature_33": {"display_name": "Anciennet\u00e9
+    Emploi (ann\u00e9es)", "min_val": 0.0, "max_val": 50.0}, "app_feature_21": {"display_name":
+    "Taux Population R\u00e9gion", "min_val": 0.001, "max_val": 0.1}, "app_feature_19":
+    {"display_name": "Source Ext\u00e9rieure 1", "min_val": 0.0, "max_val": 1.0},
+    "app_feature_31": {"display_name": "Source Ext\u00e9rieure 2", "min_val": 0.0,
+    "max_val": 1.0}, "app_feature_24": {"display_name": "Source Ext\u00e9rieure 3",
+    "min_val": 0.0, "max_val": 1.0}, "app_feature_45": {"display_name": "Nombre Enfants",
+    "min_val": 0.0, "max_val": 10.0}, "app_feature_16": {"display_name": "Montant
+    Annuit\u00e9", "min_val": 1000.0, "max_val": 100000.0}, "app_feature_17": {"display_name":
+    "Age Client (ann\u00e9es)", "min_val": 18.0, "max_val": 70.0}}'
+  optimal_threshold: '0.1841841841841842'
+mlflow_version: 2.22.0
+model_size_bytes: 15189
+model_uuid: 65ebcdd1d84f46aebe37f7ef355054db
+prompts: null
+run_id: fff29920a9554377a990b14d299f3196
+saved_input_example_info:
+  artifact_path: input_example.json
+  pandas_orient: split
+  serving_input_path: serving_input_example.json
+  type: dataframe
+signature:
+  inputs: '[{"type": "double", "name": "app_feature_0", "required": true}, {"type":
+    "double", "name": "app_feature_1", "required": true}, {"type": "double", "name":
+    "app_feature_2", "required": true}, {"type": "double", "name": "app_feature_3",
+    "required": true}, {"type": "double", "name": "app_feature_4", "required": true},
+    {"type": "double", "name": "app_feature_5", "required": true}, {"type": "double",
+    "name": "app_feature_6", "required": true}, {"type": "double", "name": "app_feature_7",
+    "required": true}, {"type": "double", "name": "app_feature_8", "required": true},
+    {"type": "double", "name": "app_feature_9", "required": true}, {"type": "double",
+    "name": "app_feature_10", "required": true}, {"type": "double", "name": "app_feature_11",
+    "required": true}, {"type": "double", "name": "app_feature_12", "required": true},
+    {"type": "double", "name": "app_feature_13", "required": true}, {"type": "double",
+    "name": "app_feature_14", "required": true}, {"type": "double", "name": "app_feature_15",
+    "required": true}, {"type": "double", "name": "app_feature_16", "required": true},
+    {"type": "double", "name": "app_feature_17", "required": true}, {"type": "double",
+    "name": "app_feature_18", "required": true}, {"type": "double", "name": "app_feature_19",
+    "required": true}, {"type": "double", "name": "app_feature_20", "required": true},
+    {"type": "double", "name": "app_feature_21", "required": true}, {"type": "double",
+    "name": "app_feature_22", "required": true}, {"type": "double", "name": "app_feature_23",
+    "required": true}, {"type": "double", "name": "app_feature_24", "required": true},
+    {"type": "double", "name": "app_feature_25", "required": true}, {"type": "double",
+    "name": "app_feature_26", "required": true}, {"type": "double", "name": "app_feature_27",
+    "required": true}, {"type": "double", "name": "app_feature_28", "required": true},
+    {"type": "double", "name": "app_feature_29", "required": true}, {"type": "double",
+    "name": "app_feature_30", "required": true}, {"type": "double", "name": "app_feature_31",
+    "required": true}, {"type": "double", "name": "app_feature_32", "required": true},
+    {"type": "double", "name": "app_feature_33", "required": true}, {"type": "double",
+    "name": "app_feature_34", "required": true}, {"type": "double", "name": "app_feature_35",
+    "required": true}, {"type": "double", "name": "app_feature_36", "required": true},
+    {"type": "double", "name": "app_feature_37", "required": true}, {"type": "double",
+    "name": "app_feature_38", "required": true}, {"type": "double", "name": "app_feature_39",
+    "required": true}, {"type": "double", "name": "app_feature_40", "required": true},
+    {"type": "double", "name": "app_feature_41", "required": true}, {"type": "double",
+    "name": "app_feature_42", "required": true}, {"type": "double", "name": "app_feature_43",
+    "required": true}, {"type": "double", "name": "app_feature_44", "required": true},
+    {"type": "double", "name": "app_feature_45", "required": true}, {"type": "double",
+    "name": "app_feature_46", "required": true}, {"type": "double", "name": "app_feature_47",
+    "required": true}, {"type": "double", "name": "app_feature_48", "required": true},
+    {"type": "double", "name": "app_feature_49", "required": true}, {"type": "double",
+    "name": "bureau_feat_0", "required": true}, {"type": "double", "name": "bureau_feat_1",
+    "required": true}, {"type": "double", "name": "bureau_feat_2", "required": true},
+    {"type": "double", "name": "bureau_feat_3", "required": true}, {"type": "double",
+    "name": "bureau_feat_4", "required": true}, {"type": "double", "name": "prev_app_feat_0",
+    "required": true}, {"type": "double", "name": "prev_app_feat_1", "required": true},
+    {"type": "double", "name": "prev_app_feat_2", "required": true}, {"type": "double",
+    "name": "prev_app_feat_3", "required": true}, {"type": "double", "name": "prev_app_feat_4",
+    "required": true}, {"type": "double", "name": "pos_feat_0", "required": true},
+    {"type": "double", "name": "pos_feat_1", "required": true}, {"type": "double",
+    "name": "pos_feat_2", "required": true}, {"type": "double", "name": "pos_feat_3",
+    "required": true}, {"type": "double", "name": "pos_feat_4", "required": true},
+    {"type": "double", "name": "install_feat_0", "required": true}, {"type": "double",
+    "name": "install_feat_1", "required": true}, {"type": "double", "name": "install_feat_2",
+    "required": true}, {"type": "double", "name": "install_feat_3", "required": true},
+    {"type": "double", "name": "install_feat_4", "required": true}, {"type": "double",
+    "name": "cc_feat_0", "required": true}, {"type": "double", "name": "cc_feat_1",
+    "required": true}, {"type": "double", "name": "cc_feat_2", "required": true},
+    {"type": "double", "name": "cc_feat_3", "required": true}, {"type": "double",
+    "name": "cc_feat_4", "required": true}, {"type": "string", "name": "NAME_CONTRACT_TYPE",
+    "required": true}, {"type": "string", "name": "CODE_GENDER", "required": true},
+    {"type": "string", "name": "FLAG_OWN_CAR", "required": true}, {"type": "string",
+    "name": "NAME_INCOME_TYPE", "required": true}]'
+  outputs: '[{"type": "tensor", "tensor-spec": {"dtype": "float64", "shape": [-1,
+    2]}}]'
+  params: null
+type_hint_from_example: false
+utc_time_created: '2025-07-15 17:39:45.804396'
