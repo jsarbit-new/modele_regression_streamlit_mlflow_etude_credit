@@ -3,5 +3,4 @@ pandas
 scikit-learn
 mlflow
 shap
-numpy>=1.25.0
 evidently==0.2.8
