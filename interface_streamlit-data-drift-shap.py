@@ -249,63 +249,72 @@ def load_mlflow_pipeline_local():
         return None
 
 @st.cache_resource(show_spinner="Calcul de l'explainer SHAP...")
-def load_shap_explainer(_pipeline, all_training_features):
-    # Assurez-vous que le pipeline a bien un 'preprocessor'
-    if 'preprocessor' in _pipeline.named_steps:
-        preprocessor = _pipeline.named_steps['preprocessor']
+def load_shap_explainer(_pyfunc_pipeline, all_training_features):
+    """
+    Charge l'explainer SHAP et le préprocesseur à partir du pipeline MLflow.
+    Args:
+        _pyfunc_pipeline: L'objet PyFuncModel chargé par MLflow.
+        all_training_features: Liste de toutes les features d'entraînement attendues.
+    Returns:
+        tuple: (shap.Explainer, preprocessor) ou (None, None) en cas d'échec.
+    """
+    # Tente d'extraire le pipeline scikit-learn sous-jacent
+    # Si le modèle a été enregistré avec mlflow.sklearn.log_model, _model_impl devrait être le pipeline sklearn
+    sklearn_pipeline = None
+    if hasattr(_pyfunc_pipeline, '_model_impl'):
+        sklearn_pipeline = _pyfunc_pipeline._model_impl
+    
+    if sklearn_pipeline is None or not hasattr(sklearn_pipeline, 'named_steps'):
+        st.error("Impossible d'extraire le pipeline scikit-learn du modèle MLflow. L'explainer SHAP ne peut pas être initialisé correctement.")
+        logger.error("Could not extract a scikit-learn Pipeline with named_steps from the MLflow PyFuncModel.")
+        return None, None # Retourne None pour l'explainer et le préprocesseur en cas d'échec
+
+    # Maintenant, utilise sklearn_pipeline pour obtenir le préprocesseur et le modèle final
+    if 'preprocessor' in sklearn_pipeline.named_steps:
+        preprocessor = sklearn_pipeline.named_steps['preprocessor']
     else:
-        # Si le pipeline n'a pas de préprocesseur nommé 'preprocessor',
-        # cela signifie que le modèle est peut-être directement le classifieur
-        # ou que le préprocesseur est intégré différemment.
-        # Pour cet exemple, nous allons simuler un préprocesseur si absent.
-        logger.warning("Le pipeline ne contient pas de 'preprocessor' nommé. SHAP pourrait nécessiter un ajustement.")
-        # Utiliser une identité si pas de préprocesseur explicite
+        logger.warning("Le pipeline scikit-learn ne contient pas d'étape nommée 'preprocessor'. SHAP pourrait nécessiter un ajustement.")
+        # Fallback vers un IdentityPreprocessor si l'étape 'preprocessor' n'est pas trouvée
         class IdentityPreprocessor:
-            def transform(self, X):
-                return X
-            def get_feature_names_out(self, input_features=None): # Added input_features for compatibility
-                if isinstance(X, pd.DataFrame):
-                    return X.columns.tolist()
-                return [f"col_{i}" for i in range(X.shape[1])]
+            def transform(self, X): return X
+            def get_feature_names_out(self, input_features=None):
+                if input_features is not None and isinstance(input_features, list):
+                    return input_features
+                # Fallback si input_features n'est pas fourni ou n'est pas une liste
+                # Cette partie est délicate, car X n'est pas disponible ici.
+                # Il est plus sûr de supposer que le préprocesseur est manquant ou mal nommé.
+                # Pour un cas réel, il faudrait s'assurer que le préprocesseur est bien nommé ou exposé.
+                return [f"col_{i}" for i in range(X.shape[1])] if 'X' in locals() else [] # Fallback, peut ne pas être précis
         preprocessor = IdentityPreprocessor()
     
-    final_model = _pipeline.steps[-1][1] # Le dernier pas du pipeline est le modèle final
-    
-    # Génération de données de référence pour l'explainer SHAP
-    # Assurez-vous que ces données sont représentatives de vos données d'entraînement
-    # Réduit le nombre de lignes pour SHAP pour économiser la mémoire
-    ref_data_raw = run_feature_engineering_pipeline(num_rows=1000) # Keep 1000 rows for SHAP reference
+    final_model = sklearn_pipeline.steps[-1][1] # La dernière étape du pipeline sklearn est le modèle final
+
+    # Génère les données de référence pour l'explainer SHAP
+    ref_data_raw = run_feature_engineering_pipeline(num_rows=1000) # Garde 1000 lignes pour la référence SHAP
     if ref_data_raw is None:
         st.error("Impossible de charger les données de référence pour l'explainer SHAP.")
-        return None
+        return None, None
 
-    # Assurez-vous que les colonnes de ref_data_raw correspondent à all_training_features
-    # avant de les passer au préprocesseur
     ref_data_raw_filtered = ref_data_raw[all_training_features]
-    
     ref_data_processed = preprocessor.transform(ref_data_raw_filtered)
     
-    # Obtenir les noms de features après préprocessing
     try:
-        # Check if get_feature_names_out accepts input_features or is a method
         if hasattr(preprocessor, 'get_feature_names_out') and callable(preprocessor.get_feature_names_out):
-            # Try calling with input_features if available, otherwise without
             try:
                 processed_feature_names = preprocessor.get_feature_names_out(input_features=all_training_features)
             except TypeError:
                 processed_feature_names = preprocessor.get_feature_names_out()
         else:
-            # Fallback if get_feature_names_out is not available or not a method
             processed_feature_names = [f"col_{i}" for i in range(ref_data_processed.shape[1])]
             logger.warning("Impossible d'obtenir les noms de features du préprocesseur. Noms génériques utilisés.")
     except Exception as e:
         logger.warning(f"Erreur lors de l'appel de get_feature_names_out: {e}. Noms génériques utilisés.")
         processed_feature_names = [f"col_{i}" for i in range(ref_data_processed.shape[1])]
 
-
     ref_data_df = pd.DataFrame(ref_data_processed, columns=processed_feature_names)
     
-    return shap.Explainer(final_model, ref_data_df)
+    explainer = shap.Explainer(final_model, ref_data_df)
+    return explainer, preprocessor
 
 @st.cache_data(show_spinner="Génération des données de référence pour le drift...")
 def load_reference_data_for_drift():
@@ -492,22 +501,24 @@ with tab1:
             try:
                 # Charger l'explainer SHAP et le préprocesseur
                 # Ces fonctions sont maintenant appelées ici, après avoir vérifié que pipeline est non-None
-                shap_explainer = load_shap_explainer(pipeline, all_training_features)
-                preprocessor_for_shap = pipeline.named_steps['preprocessor']
+                shap_explainer, preprocessor_for_shap = load_shap_explainer(pipeline, all_training_features)
                 
-                prediction_proba = pipeline.predict_proba(input_df)[:, 1][0]
-                prediction_class = 1 if prediction_proba >= optimal_threshold else 0
-                st.subheader("🎉 Résultat de la Prédiction :")
-                col_proba, col_class = st.columns(2)
-                with col_proba:
-                    st.metric(label="Probabilité de Défaut", value=f"{prediction_proba:.4f}")
-                with col_class:
-                    if prediction_class == 1:
-                        st.error("⚠️ **Client à Risque de Défaut Élevé**")
-                    else:
-                        st.success("✅ **Client à Risque de Défaut Faible**")
-                
-                display_shap_plot(shap_explainer, input_df, all_training_features, preprocessor_for_shap)
+                if shap_explainer is None or preprocessor_for_shap is None:
+                    st.error("Impossible d'initialiser l'explication SHAP. Veuillez vérifier les logs.")
+                else:
+                    prediction_proba = pipeline.predict_proba(input_df)[:, 1][0]
+                    prediction_class = 1 if prediction_proba >= optimal_threshold else 0
+                    st.subheader("🎉 Résultat de la Prédiction :")
+                    col_proba, col_class = st.columns(2)
+                    with col_proba:
+                        st.metric(label="Probabilité de Défaut", value=f"{prediction_proba:.4f}")
+                    with col_class:
+                        if prediction_class == 1:
+                            st.error("⚠️ **Client à Risque de Défaut Élevé**")
+                        else:
+                            st.success("✅ **Client à Risque de Défaut Faible**")
+                    
+                    display_shap_plot(shap_explainer, input_df, all_training_features, preprocessor_for_shap)
                 
             except Exception as e:
                 st.error(f"Une erreur est survenue lors de l'exécution de la prédiction : {e}")
