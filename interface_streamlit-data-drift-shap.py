@@ -42,7 +42,6 @@ SHAP_IMPORTANT_FEATURES_INFO = {
     "app_feature_45": {"display_name": "Nombre Enfants", "min_val": 0.0, "max_val": 10.0},
     "app_feature_17": {"display_name": "Age Client (années)", "min_val": 18.0, "max_val": 70.0},
 }
-# SHAP_IMPORTANT_FEATURES_NAMES = list(SHAP_IMPORTANT_FEATURES_INFO.keys()) # Cette ligne est redondante
 
 # NOUVEAU: Dictionnaire de noms descriptifs pour TOUTES les variables
 FULL_DESCRIPTIVE_NAMES = {
@@ -134,21 +133,24 @@ FULL_DESCRIPTIVE_NAMES = {
     "FLAG_OWN_CAR": "Possède une Voiture",
     "NAME_INCOME_TYPE": "Type de Revenu",
 }
-# Cette ligne est déjà définie, pas besoin de la répéter
-# SHAP_IMPORTANT_FEATURES_NAMES = list(SHAP_IMPORTANT_FEATURES_INFO.keys())
 
 # --- Fonctions Stub pour la Génération de Données (utilisées pour la démo) ---
 @st.cache_data(show_spinner="Chargement des données...")
-def load_application_data_stub(num_rows):
+def load_application_data_stub(num_rows=None):
     """
     Charge et retourne les données.
     Cette fonction ne s'exécutera qu'une seule fois.
+    Args:
+        num_rows (int, optional): Nombre de lignes à lire. Si None, lit 100 lignes.
     """
     try:
-        # --- MODIFICATION ICI ---
-        # Remplacez 'REMPLACEZ_PAR_VOTRE_FICHIER_CSV.csv' par le nom réel de votre fichier CSV
-        # Par exemple: 'input/application_train.csv'
-        df = pd.read_csv('input/application_train.csv') # Remplacez 'application_train.csv' par le nom de votre fichier 
+        # Load only a subset of rows to save memory on Streamlit Cloud
+        if num_rows is None:
+            # For initial app setup, load minimal rows (e.g., for column names)
+            df = pd.read_csv('input/application_train.csv', nrows=100)
+        else:
+            # For specific calls like drift analysis, load specified num_rows
+            df = pd.read_csv('input/application_train.csv', nrows=num_rows)
         return df
     except FileNotFoundError:
         st.error("Fichier de données non trouvé. Assurez-vous que le fichier est bien à sa place dans le dossier 'input'.")
@@ -156,6 +158,7 @@ def load_application_data_stub(num_rows):
 
 @st.cache_data(show_spinner="Traitement des données Bureau...")
 def process_bureau_data_stub(df):
+    if df is None: return None # Propagate None if previous step failed
     for i in range(5):
         if f'bureau_feat_{i}' not in df.columns:
             df[f'bureau_feat_{i}'] = np.random.rand(len(df))
@@ -163,6 +166,7 @@ def process_bureau_data_stub(df):
 
 @st.cache_data(show_spinner="Traitement des demandes précédentes...")
 def process_previous_applications_data_stub(df):
+    if df is None: return None # Propagate None if previous step failed
     for i in range(5):
         if f'prev_app_feat_{i}' not in df.columns:
             df[f'prev_app_feat_{i}'] = np.random.rand(len(df))
@@ -170,6 +174,7 @@ def process_previous_applications_data_stub(df):
 
 @st.cache_data(show_spinner="Traitement des données POS Cash...")
 def process_pos_cash_data_stub(df):
+    if df is None: return None # Propagate None if previous step failed
     for i in range(5):
         if f'pos_feat_{i}' not in df.columns:
             df[f'pos_feat_{i}'] = np.random.rand(len(df))
@@ -177,6 +182,7 @@ def process_pos_cash_data_stub(df):
 
 @st.cache_data(show_spinner="Traitement des paiements d'acomptes...")
 def process_installments_payments_data_stub(df):
+    if df is None: return None # Propagate None if previous step failed
     for i in range(5):
         if f'install_feat_{i}' not in df.columns:
             df[f'install_feat_{i}'] = np.random.rand(len(df))
@@ -184,6 +190,7 @@ def process_installments_payments_data_stub(df):
 
 @st.cache_data(show_spinner="Traitement des données de carte de crédit...")
 def process_credit_card_balance_data_stub(df):
+    if df is None: return None # Propagate None if previous step failed
     for i in range(5):
         if f'cc_feat_{i}' not in df.columns:
             df[f'cc_feat_{i}'] = np.random.rand(len(df))
@@ -191,11 +198,18 @@ def process_credit_card_balance_data_stub(df):
 
 @st.cache_data(show_spinner="Exécution du pipeline d'ingénierie des caractéristiques...")
 def run_feature_engineering_pipeline(num_rows):
-    df = load_application_data_stub(num_rows)
+    # Pass num_rows to load_application_data_stub to limit initial data load
+    df = load_application_data_stub(num_rows=num_rows)
+    if df is None:
+        return None # Return None if initial data loading failed
     df = process_bureau_data_stub(df)
+    if df is None: return None
     df = process_previous_applications_data_stub(df)
+    if df is None: return None
     df = process_pos_cash_data_stub(df)
+    if df is None: return None
     df = process_installments_payments_data_stub(df)
+    if df is None: return None
     df = process_credit_card_balance_data_stub(df)
     return df
 
@@ -209,7 +223,12 @@ def load_model_metadata_local():
     optimal_threshold = 0.5 # Valeur par défaut, ajustez si nécessaire
     
     # Génération des noms de colonnes via le stub pour simuler les features d'entraînement
+    # Only need 1 row to get column names, so this is efficient.
     dummy_data = run_feature_engineering_pipeline(num_rows=1)
+    if dummy_data is None:
+        logger.error("Failed to load dummy data for model metadata. Returning None for metadata.")
+        return None, None, None # Return None for all values to indicate failure
+
     all_training_features = list(dummy_data.columns)
     
     logger.info("Métadonnées du modèle chargées localement.")
@@ -244,16 +263,22 @@ def load_shap_explainer(_pipeline, all_training_features):
         class IdentityPreprocessor:
             def transform(self, X):
                 return X
-            def get_feature_names_out(self):
-                return X.columns
+            def get_feature_names_out(self, input_features=None): # Added input_features for compatibility
+                if isinstance(X, pd.DataFrame):
+                    return X.columns.tolist()
+                return [f"col_{i}" for i in range(X.shape[1])]
         preprocessor = IdentityPreprocessor()
     
     final_model = _pipeline.steps[-1][1] # Le dernier pas du pipeline est le modèle final
     
     # Génération de données de référence pour l'explainer SHAP
     # Assurez-vous que ces données sont représentatives de vos données d'entraînement
-    ref_data_raw = run_feature_engineering_pipeline(num_rows=1000)
-    
+    # Réduit le nombre de lignes pour SHAP pour économiser la mémoire
+    ref_data_raw = run_feature_engineering_pipeline(num_rows=1000) # Keep 1000 rows for SHAP reference
+    if ref_data_raw is None:
+        st.error("Impossible de charger les données de référence pour l'explainer SHAP.")
+        return None
+
     # Assurez-vous que les colonnes de ref_data_raw correspondent à all_training_features
     # avant de les passer au préprocesseur
     ref_data_raw_filtered = ref_data_raw[all_training_features]
@@ -261,14 +286,22 @@ def load_shap_explainer(_pipeline, all_training_features):
     ref_data_processed = preprocessor.transform(ref_data_raw_filtered)
     
     # Obtenir les noms de features après préprocessing
-    # Si preprocessor.get_feature_names_out() n'existe pas ou ne fonctionne pas,
-    # vous devrez peut-être les déduire manuellement ou les définir.
     try:
-        processed_feature_names = preprocessor.get_feature_names_out()
-    except AttributeError:
-        # Fallback si get_feature_names_out n'est pas disponible
+        # Check if get_feature_names_out accepts input_features or is a method
+        if hasattr(preprocessor, 'get_feature_names_out') and callable(preprocessor.get_feature_names_out):
+            # Try calling with input_features if available, otherwise without
+            try:
+                processed_feature_names = preprocessor.get_feature_names_out(input_features=all_training_features)
+            except TypeError:
+                processed_feature_names = preprocessor.get_feature_names_out()
+        else:
+            # Fallback if get_feature_names_out is not available or not a method
+            processed_feature_names = [f"col_{i}" for i in range(ref_data_processed.shape[1])]
+            logger.warning("Impossible d'obtenir les noms de features du préprocesseur. Noms génériques utilisés.")
+    except Exception as e:
+        logger.warning(f"Erreur lors de l'appel de get_feature_names_out: {e}. Noms génériques utilisés.")
         processed_feature_names = [f"col_{i}" for i in range(ref_data_processed.shape[1])]
-        logger.warning("Impossible d'obtenir les noms de features du préprocesseur. Noms génériques utilisés.")
+
 
     ref_data_df = pd.DataFrame(ref_data_processed, columns=processed_feature_names)
     
@@ -278,17 +311,25 @@ def load_shap_explainer(_pipeline, all_training_features):
 def load_reference_data_for_drift():
     try:
         # Utilise la fonction stub pour générer des données de référence
-        reference_df = run_feature_engineering_pipeline(num_rows=30000)
+        # RÉDUIT LE NOMBRE DE LIGNES POUR ÉCONOMISER LA MÉMOIRE SUR STREAMLIT CLOUD
+        reference_df = run_feature_engineering_pipeline(num_rows=5000) # Réduit de 30000 à 5000
+        if reference_df is None:
+            st.error("Impossible de charger les données de référence pour le drift.")
+            return None
         logger.info(f"Données de référence chargées avec succès. Nombre d'échantillons: {len(reference_df)}")
         return reference_df
     except Exception as e:
         st.error(f"Erreur lors du chargement des données de référence : {e}")
-        st.stop()
+        logger.exception("Erreur lors du chargement des données de référence dans Streamlit:")
         return None
 
 # --- Fonctions d'Affichage des Rapports ---
 def generate_and_display_evidently_report(reference_df, current_df):
     try:
+        if reference_df is None or current_df is None:
+            st.warning("Impossible de générer le rapport Evidently : données de référence ou actuelles manquantes.")
+            return
+
         st.info("Génération du rapport en cours. Cela peut prendre quelques instants...")
         report_file_path = "evidently_data_drift_report_temp.html"
         data_drift_dashboard = Dashboard(tabs=[DataDriftTab()])
@@ -348,13 +389,12 @@ def display_shap_plot(shap_explainer, input_df, all_training_features, preproces
         -   **E[f(x)]** est la probabilité moyenne du modèle sur l'ensemble de l'entraînement.
     """)
     try:
+        if shap_explainer is None:
+            st.error("L'explainer SHAP n'a pas pu être chargé. Impossible d'afficher le graphique SHAP.")
+            return
+
         # Assurez-vous que input_df contient toutes les colonnes attendues par le préprocesseur
-        # et dans le bon ordre.
-        # Si input_df n'a que les features importantes, il faut le compléter avec des zéros
-        # ou des valeurs par défaut pour les autres features attendues par le préprocesseur.
-        
-        # Pour la démo, on s'assure que input_df a toutes les colonnes de all_training_features
-        # avec des valeurs par défaut si elles ne sont pas dans user_inputs
+        # en utilisant les valeurs par défaut (0.0) pour les features non saisies
         full_input_df = pd.DataFrame(columns=all_training_features)
         full_input_df.loc[0] = 0 # Initialise avec des zéros
         for col in input_df.columns:
@@ -364,7 +404,20 @@ def display_shap_plot(shap_explainer, input_df, all_training_features, preproces
         input_for_shap = preprocessor.transform(full_input_df[all_training_features])
         shap_values_instance = shap_explainer(input_for_shap)
         
-        processed_feature_names = preprocessor.get_feature_names_out()
+        # Ensure processed_feature_names is obtained correctly from the preprocessor
+        try:
+            if hasattr(preprocessor, 'get_feature_names_out') and callable(preprocessor.get_feature_names_out):
+                try:
+                    processed_feature_names = preprocessor.get_feature_names_out(input_features=all_training_features)
+                except TypeError:
+                    processed_feature_names = preprocessor.get_feature_names_out()
+            else:
+                processed_feature_names = [f"col_{i}" for i in range(input_for_shap.shape[1])]
+                logger.warning("Impossible d'obtenir les noms de features du préprocesseur pour SHAP. Noms génériques utilisés.")
+        except Exception as e:
+            logger.warning(f"Erreur lors de l'appel de get_feature_names_out pour SHAP: {e}. Noms génériques utilisés.")
+            processed_feature_names = [f"col_{i}" for i in range(input_for_shap.shape[1])]
+
         readable_feature_names = map_feature_names(processed_feature_names, FULL_DESCRIPTIVE_NAMES)
         
         # Assurez-vous que les noms de features sont correctement mappés pour l'affichage SHAP
@@ -382,7 +435,6 @@ def display_shap_plot(shap_explainer, input_df, all_training_features, preproces
         logger.exception("Erreur lors de l'exécution de SHAP dans Streamlit:")
 
 # --- 6. Chargement des Ressources au Démarrage ---
-# Utilisation des fonctions de chargement local
 features_info, optimal_threshold, all_training_features = load_model_metadata_local()
 pipeline = load_mlflow_pipeline_local()
 
@@ -395,7 +447,11 @@ with tab1:
     st.markdown("""
     Cette application vous permet de simuler une prédiction de risque de défaut pour un client.
     """)
-    if features_info and pipeline: # Vérifie que le modèle et les métadonnées sont chargés
+    # Vérifie que le modèle et les métadonnées sont chargés
+    if features_info is None or pipeline is None:
+        st.error("L'application n'a pas pu être initialisée car le modèle ou les métadonnées n'ont pas pu être chargés. Veuillez vérifier les logs pour plus de détails.")
+        st.stop() # Arrête l'exécution si les ressources critiques sont manquantes
+    else:
         st.sidebar.header("Informations sur le Modèle")
         st.sidebar.write(f"**Nom du Modèle :** `Pipeline de Régression Logistique`") # Nom générique
         st.sidebar.write(f"**Source du Modèle :** `Local (Dossier '{LOCAL_MODEL_PATH}')`")
@@ -435,6 +491,7 @@ with tab1:
             
             try:
                 # Charger l'explainer SHAP et le préprocesseur
+                # Ces fonctions sont maintenant appelées ici, après avoir vérifié que pipeline est non-None
                 shap_explainer = load_shap_explainer(pipeline, all_training_features)
                 preprocessor_for_shap = pipeline.named_steps['preprocessor']
                 
@@ -455,8 +512,6 @@ with tab1:
             except Exception as e:
                 st.error(f"Une erreur est survenue lors de l'exécution de la prédiction : {e}")
                 logger.exception("Erreur lors de la prédiction Streamlit:")
-    else:
-        st.error("L'application n'a pas pu être initialisée. Vérifiez les logs pour plus de détails.")
 
 with tab2:
     st.header("Analyse du Data Drift (Evidently AI)")
@@ -469,12 +524,15 @@ with tab2:
         reference_data_for_drift = load_reference_data_for_drift()
         
         # Simulation de data drift
-        df_production = reference_data_for_drift.copy()
-        if 'AMT_CREDIT' in df_production.columns:
-            df_production['AMT_CREDIT'] = df_production['AMT_CREDIT'] * np.random.normal(1.2, 0.1, len(df_production))
-        if 'app_feature_17' in df_production.columns: # Correspond à l'âge client
-            df_production['app_feature_17'] = df_production['app_feature_17'] + np.random.randint(-5, 5, len(df_production))
-        
-        generate_and_display_evidently_report(reference_data_for_drift, df_production)
+        if reference_data_for_drift is not None:
+            df_production = reference_data_for_drift.copy()
+            if 'AMT_CREDIT' in df_production.columns:
+                df_production['AMT_CREDIT'] = df_production['AMT_CREDIT'] * np.random.normal(1.2, 0.1, len(df_production))
+            if 'app_feature_17' in df_production.columns: # Correspond à l'âge client
+                df_production['app_feature_17'] = df_production['app_feature_17'] + np.random.randint(-5, 5, len(df_production))
+            
+            generate_and_display_evidently_report(reference_data_for_drift, df_production)
+        else:
+            st.warning("Impossible de générer le rapport de Data Drift car les données de référence n'ont pas pu être chargées.")
     else:
         st.warning("Cliquez sur le bouton pour générer le rapport de dérive des données.")
