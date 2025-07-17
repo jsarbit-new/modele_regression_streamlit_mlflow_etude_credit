@@ -3,6 +3,7 @@ input/
 data/
 mlruns_custom_location/
 Archives/
+.venv_py39/
 
 # Fichiers Python à ignorer (anciennes versions ou tests)
 nouv_reg_logistique.py
