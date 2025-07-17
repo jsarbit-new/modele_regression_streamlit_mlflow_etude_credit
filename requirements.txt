@@ -1,7 +1,9 @@
 streamlit
-pandas
 numpy==1.26.4
 scikit-learn
-mlflow
 shap
 evidently==0.2.8
+mlflow==2.22.0
+packaging==24.1
+pandas==2.2.3
+scipy==1.15.3
