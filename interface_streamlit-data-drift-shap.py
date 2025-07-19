@@ -29,13 +29,13 @@ warnings.filterwarnings("ignore", category=UserWarning, module="evidently")
 # --- Configuration AWS S3 ---
 AWS_S3_BUCKET_NAME = st.secrets["aws"]["bucket_name"]
 AWS_ACCESS_KEY_ID = st.secrets["aws"]["aws_access_key_id"]
-AWS_SECRET_ACCESS_KEY = st.secrets["aws"]["aws_secret_access_key"] # Corrected 'key' to 'KEY'
+AWS_SECRET_ACCESS_KEY = st.secrets["aws"]["aws_secret_access_key"]
 
 # Initialisation du client S3
 s3_client = boto3.client(
     's3',
     aws_access_key_id=AWS_ACCESS_KEY_ID,
-    aws_secret_access_key=AWS_SECRET_ACCESS_KEY # Corrected 'key' to 'KEY'
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY
 )
 
 # --- Fonctions de chargement de données et de modèles ---
@@ -171,7 +171,7 @@ def download_mlflow_model_from_s3(s3_prefix, local_dir):
 # --- Préparation des données d'entraînement (pour SHAP et Data Drift) ---
 
 @st.cache_data(show_spinner="Chargement des données d'entraînement pour SHAP et Data Drift depuis S3...")
-def load_training_data_for_shap(file_key="input/application_train.csv"): # Corrected to "input"
+def load_training_data_for_shap(file_key="input/application_train.csv"):
     """Charge les données d'entraînement complètes pour les calculs SHAP et Data Drift."""
     try:
         data = load_data_from_s3(file_key)
@@ -195,14 +195,10 @@ def run_feature_engineering_pipeline(num_rows=None):
     Simule une partie de l'ingénierie des caractéristiques pour obtenir des données brutes
     à utiliser comme base pour SHAP et le préprocesseur.
     """
-    # Changed file_key to "input/application_train.csv"
     raw_data = load_training_data_for_shap(file_key="input/application_train.csv") 
     if raw_data is None:
         return None
     
-    # Ici, vous devriez inclure les étapes de votre pipeline qui transforment les données
-    # brutes en données que votre modèle attend.
-    # Pour l'instant, on retourne un échantillon des données brutes.
     if num_rows:
         return raw_data.sample(min(num_rows, len(raw_data)), random_state=42)
     return raw_data
@@ -230,8 +226,6 @@ def load_shap_explainer(_pyfunc_pipeline, all_training_features):
     Returns:
         tuple: (shap.Explainer, preprocessor) ou (None, None) en cas d'échec.
     """
-    # Tente d'extraire le modèle scikit-learn sous-jacent
-    # Si le modèle a été enregistré avec mlflow.sklearn.log_model, _model_impl devrait être le modèle/pipeline sklearn
     sklearn_model_or_pipeline = None
     if hasattr(_pyfunc_pipeline, '_model_impl'):
         sklearn_model_or_pipeline = _pyfunc_pipeline._model_impl
@@ -239,30 +233,26 @@ def load_shap_explainer(_pyfunc_pipeline, all_training_features):
     if sklearn_model_or_pipeline is None:
         st.error("Impossible d'extraire le modèle/pipeline scikit-learn du modèle MLflow. L'explainer SHAP ne peut pas être initialisé correctement.")
         logger.error("Could not extract a scikit-learn model or Pipeline from the MLflow PyFuncModel.")
-        return None, None # Retourne None pour l'explainer et le préprocesseur en cas d'échec
+        return None, None
 
     preprocessor = None
     final_model = None
 
-    # Vérifie si c'est un Pipeline scikit-learn
     if isinstance(sklearn_model_or_pipeline, Pipeline) or hasattr(sklearn_model_or_pipeline, 'named_steps'):
         logger.info("Modèle MLflow chargé est reconnu comme un Pipeline scikit-learn.")
-        # C'est un pipeline, extrayons le préprocesseur et le modèle final
-        if 'preprocessor' in sklearn_model_or_or_pipeline.named_steps: # Typo here
+        # Correction d'une faute de frappe ici : 'sklearn_model_or_or_pipeline' -> 'sklearn_model_or_pipeline'
+        if 'preprocessor' in sklearn_model_or_pipeline.named_steps: 
             preprocessor = sklearn_model_or_pipeline.named_steps['preprocessor']
             logger.info("Préprocesseur nommé 'preprocessor' trouvé dans le pipeline.")
         else:
             logger.warning("Le pipeline scikit-learn ne contient pas d'étape nommée 'preprocessor'. Utilisation d'IdentityPreprocessor.")
             preprocessor = IdentityPreprocessor()
         
-        # Le modèle final est généralement la dernière étape du pipeline
         final_model = sklearn_model_or_pipeline.steps[-1][1] 
         logger.info(f"Modèle final extrait du pipeline: {type(final_model)}")
     else:
-        # Si ce n'est pas un pipeline avec named_steps, c'est probablement le modèle final directement
         logger.info("Le modèle MLflow chargé n'est pas un pipeline scikit-learn avec 'named_steps'. Traitement comme un modèle final direct.")
         final_model = sklearn_model_or_pipeline
-        # Dans ce cas, nous n'avons pas de préprocesseur explicite, utilisons un IdentityPreprocessor
         preprocessor = IdentityPreprocessor()
 
     if final_model is None:
@@ -270,8 +260,7 @@ def load_shap_explainer(_pyfunc_pipeline, all_training_features):
         logger.error("Final model could not be extracted or identified.")
         return None, None
 
-    # Génère les données de référence pour l'explainer SHAP
-    ref_data_raw = run_feature_engineering_pipeline(num_rows=1000) # Garde 1000 lignes pour la référence SHAP
+    ref_data_raw = run_feature_engineering_pipeline(num_rows=1000)
     if ref_data_raw is None:
         st.error("Impossible de charger les données de référence pour l'explainer SHAP.")
         return None, None
@@ -279,19 +268,16 @@ def load_shap_explainer(_pyfunc_pipeline, all_training_features):
     # S'assurer que seules les colonnes d'entraînement sont utilisées
     ref_data_raw_filtered = ref_data_raw[all_training_features]
     
-    # Appliquer le préprocesseur pour obtenir les données traitées
     ref_data_processed = preprocessor.transform(ref_data_raw_filtered)
     
-    # Obtenir les noms des caractéristiques après prétraitement
-    processed_feature_names = all_training_features # Fallback
+    processed_feature_names = all_training_features
     try:
         if hasattr(preprocessor, 'get_feature_names_out') and callable(preprocessor.get_feature_names_out):
-            # Tente avec input_features pour ColumnTransformer
             try:
                 processed_feature_names = preprocessor.get_feature_names_out(input_features=all_training_features)
-            except TypeError: # Si get_feature_names_out ne prend pas input_features
+            except TypeError:
                 processed_feature_names = preprocessor.get_feature_names_out()
-        elif hasattr(ref_data_processed, 'columns'): # Si c'est un DataFrame après transformation
+        elif hasattr(ref_data_processed, 'columns'):
             processed_feature_names = ref_data_processed.columns.tolist()
         else:
             processed_feature_names = [f"col_{i}" for i in range(ref_data_processed.shape[1])]
@@ -301,10 +287,8 @@ def load_shap_explainer(_pyfunc_pipeline, all_training_features):
         processed_feature_names = [f"col_{i}" for i in range(ref_data_processed.shape[1])]
 
 
-    # Assurez-vous que ref_data_processed est un DataFrame pour SHAP
     ref_data_df = pd.DataFrame(ref_data_processed, columns=processed_feature_names)
     
-    # Utilisation de shap.Explainer avec le modèle final et les données de référence
     explainer = shap.Explainer(final_model, ref_data_df)
     return explainer, preprocessor
 
@@ -317,10 +301,9 @@ def plot_feature_importance(explainer, shap_values, feature_names, top_n=10):
         st.warning("Impossible d'afficher l'importance des caractéristiques : données SHAP manquantes.")
         return
 
-    # S'assurer que shap_values a la bonne forme et que c'est bien numpy array
-    if isinstance(shap_values, list): # Si c'est une liste de valeurs SHAP (pour plusieurs sorties)
+    if isinstance(shap_values, list):
         shap_values_abs_mean = np.abs(np.array(shap_values[0])).mean(0)
-    else: # Pour une seule sortie ou direct
+    else:
         shap_values_abs_mean = np.abs(np.array(shap_values)).mean(0)
 
     if len(shap_values_abs_mean) != len(feature_names):
@@ -350,25 +333,16 @@ def plot_individual_explanation(explainer, shap_values_individual, processed_fea
         st.warning("Impossible d'afficher l'explication individuelle : données SHAP manquantes.")
         return
     
-    # Assurez-vous que shap_values_individual est bien un tableau numpy
     if isinstance(shap_values_individual, list):
-        # Pour le cas où le modèle a plusieurs sorties, prenons la première pour l'explication individuelle
         shap_values_individual = shap_values_individual[0] 
 
     try:
-        # Utilisez shap.waterfall_plot directement.
-        # Il nécessite un shap.Explanation objet, qui peut être créé.
-        # Si explainer est un TreeExplainer ou KernelExplainer, base_values est direct.
-        # Sinon, il faut le récupérer depuis l'explainer ou le calculer (e.g., np.mean(explainer.expected_value)).
-        
-        # Pour shap.Explainer générique, expected_value est un attribut
         expected_value = explainer.expected_value
         
-        # S'assurer que processed_features_df est un DataFrame pandas pour l'indexation
         if not isinstance(processed_features_df, pd.DataFrame):
             processed_features_df = pd.DataFrame([processed_features_df], columns=feature_names)
             
-        shap.initjs() # Initialise JavaScript pour les plots SHAP
+        shap.initjs()
         
         fig, ax = plt.subplots(figsize=(10, 6))
         shap.waterfall_plot(
@@ -379,12 +353,12 @@ def plot_individual_explanation(explainer, shap_values_individual, processed_fea
                 feature_names=feature_names
             ),
             max_display=20,
-            show=False, # Important: ne pas afficher directement, laisser Streamlit le faire
+            show=False,
             ax=ax
         )
         ax.set_title(f"Explication SHAP pour le client {client_id}")
-        st.pyplot(fig) # Utilisez st.pyplot pour afficher le plot matplotlib
-        plt.close(fig) # Fermez la figure pour libérer la mémoire
+        st.pyplot(fig)
+        plt.close(fig)
 
     except Exception as e:
         st.error(f"Erreur lors de l'affichage de l'explication SHAP individuelle : {e}")
@@ -399,41 +373,37 @@ st.title("Tableau de Bord de Prédiction de Risque de Crédit")
 st.write("Cette application prédit le risque de défaut de paiement pour les demandes de crédit et fournit des explications sur les prédictions.")
 
 # Chargement des données et du modèle
-# Correction du chemin du fichier pour "input/application_test.csv"
 data = load_data_from_s3("input/application_test.csv") 
 if data is None:
-    st.stop() # Arrêter l'exécution si les données ne sont pas chargées
+    st.stop()
 
 # Chargement des métadonnées du modèle
-# Assurez-vous que le fichier model_metadata.json est bien à la racine de votre bucket S3
 model_metadata = load_model_metadata_from_s3(file_key="model_metadata.json") 
 if model_metadata is None:
     st.error("Impossible de charger les métadonnées du modèle. Certaines fonctionnalités pourraient être limitées.")
-    # Définir des valeurs par défaut si les métadonnées ne sont pas disponibles
-    all_training_features = data.columns.tolist() # Fallback, à ajuster si besoin
-    threshold = 0.5 # Valeur par défaut si non trouvée
+    all_training_features = data.columns.tolist() # Fallback
+    threshold = 0.5 # Valeur par défaut
 else:
     all_training_features = model_metadata['training_features'] if 'training_features' in model_metadata else data.columns.tolist()
-    # NOUVEAU : S'assurer que 'SK_ID_CURR' n'est pas dans les features d'entraînement
-    if 'SK_ID_CURR' in all_training_features:
-        all_training_features.remove('SK_ID_CURR')
-        logger.info("SK_ID_CURR retiré de all_training_features.")
+    threshold = model_metadata.get('threshold', 0.5)
+
+# --- NOUVELLE LOGIQUE : Assurez-vous que 'SK_ID_CURR' n'est JAMAIS dans les features d'entraînement ---
+# Cette vérification est maintenant effectuée quelle que soit la source de all_training_features.
+if 'SK_ID_CURR' in all_training_features:
+    all_training_features.remove('SK_ID_CURR')
+    logger.info("SK_ID_CURR retiré de all_training_features.")
     
-    threshold = model_metadata.get('threshold', 0.5) # Récupère le seuil ou utilise 0.5 par défaut
-    
-    # Assurez-vous que les colonnes nécessaires sont présentes dans 'data'
-    missing_features_in_data = [f for f in all_training_features if f not in data.columns]
-    if missing_features_in_data:
-        st.warning(f"Attention : Les caractéristiques suivantes du modèle sont manquantes dans les données de test : {', '.join(missing_features_in_data)}. Le modèle pourrait ne pas fonctionner comme prévu.")
-        # Filtrer all_training_features pour ne garder que celles qui sont dans `data`
-        all_training_features = [f for f in all_training_features if f in data.columns]
+# Assurez-vous que les colonnes nécessaires sont présentes dans 'data'
+missing_features_in_data = [f for f in all_training_features if f not in data.columns]
+if missing_features_in_data:
+    st.warning(f"Attention : Les caractéristiques suivantes du modèle sont manquantes dans les données de test : {', '.join(missing_features_in_data)}. Le modèle pourrait ne pas fonctionner comme prévu.")
+    all_training_features = [f for f in all_training_features if f in data.columns]
 
 
 # Chargement du pipeline MLflow
 pipeline = load_mlflow_pipeline_local()
 if pipeline is None:
-    st.stop() # Arrêter l'exécution si le pipeline ne peut pas être chargé
-
+    st.stop()
 
 # --- Sidebar pour la sélection du client ---
 st.sidebar.header("Sélection du Client")
@@ -444,8 +414,11 @@ selected_client_id = st.sidebar.selectbox("Sélectionnez un ID Client :", client
 client_data_raw = data[data['SK_ID_CURR'] == selected_client_id].drop(columns=['SK_ID_CURR']).iloc[0]
 client_data_df_input = pd.DataFrame([client_data_raw]) # Pour l'entrée du pipeline
 
+# Log pour le débogage :
+logger.info(f"Features passées au pipeline: {all_training_features}")
+logger.info(f"Colonnes disponibles dans client_data_df_input: {client_data_df_input.columns.tolist()}")
+
 # Prétraiter les données du client pour la prédiction
-# Assurez-vous que seules les features attendues par le pipeline sont passées
 client_data_filtered_for_pipeline = client_data_df_input[all_training_features]
 
 # --- Prédiction ---
@@ -501,20 +474,15 @@ if explainer is not None and preprocessor is not None:
         
         # Affichage de l'explication individuelle
         if prediction_proba is not None:
-            # SHAP pour les modèles binaires de classification donne souvent deux tableaux de valeurs (pour la classe 0 et la classe 1)
-            # Nous nous intéressons à la classe positive (par défaut, classe 1)
             if isinstance(shap_values, list) and len(shap_values) > 1:
-                individual_shap_values = shap_values[1][0] # Pour la classe 1, et le premier échantillon
+                individual_shap_values = shap_values[1][0]
             else:
-                individual_shap_values = shap_values[0] # Si c'est un tableau unique (régression ou 1D classification)
+                individual_shap_values = shap_values[0]
             
-            # Convertir en DataFrame pour l'affichage si nécessaire
             client_processed_df = pd.DataFrame(client_data_processed_for_shap, columns=processed_feature_names)
 
             plot_individual_explanation(explainer, individual_shap_values, client_processed_df, processed_feature_names, selected_client_id)
             
-            # Affichage de l'importance globale des features (si plusieurs clients sont prévus pour cela, sinon ce serait un plot sur les données d'entraînement)
-            # Pour l'instant, on peut réutiliser les shap values calculées pour le client unique, mais idéalement cela devrait venir d'un ensemble de données.
             st.subheader("Importance Globale des Caractéristiques (Basée sur l'échantillon SHAP)")
             plot_feature_importance(explainer, shap_values, processed_feature_names)
 
