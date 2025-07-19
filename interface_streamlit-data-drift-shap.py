@@ -646,19 +646,23 @@ def run_feature_engineering_streamlit(raw_df_app, _fitted_preprocessor, expected
     # Pour l'instant, on ne les échantillonne pas ici, car c'est pour un client unique.
     # L'échantillonnage pour SHAP est géré dans `prepare_shap_reference_data`.
     
+    # Nouvelle variable pour l'échantillonnage des données auxiliaires lors du FE
+    # pour les données de test.
+    # Nous pourrions utiliser une valeur plus petite que AUX_DATA_SAMPLE_ROWS (50000)
+    # si les problèmes de mémoire persistent, par exemple 10000 ou 20000.
+    # Pour l'instant, utilisons la même valeur que pour le préprocesseur.
+    TEST_AUX_DATA_SAMPLE_ROWS = 50000 
+
     # 1. Exécution du Feature Engineering pour les données d'application
     df_fe = process_application_data_streamlit(raw_df_app.copy())
 
     # 2. Récupérer et traiter les données auxiliaires
-    # Ici, nous chargeons les données complètes pour le client sélectionné, car l'échantillonnage
-    # des données auxiliaires pour une prédiction individuelle n'est pas idéal.
-    # Si la mémoire devient un problème ici, il faudrait revoir la stratégie de chargement
-    # pour ne charger que les lignes pertinentes à SK_ID_CURR.
-    bureau_df_fe = process_bureau_data_streamlit()
-    prev_app_df_fe = process_previous_applications_streamlit()
-    pos_cash_df_fe = process_pos_cash_streamlit()
-    install_payments_df_fe = process_installments_payments_streamlit()
-    credit_card_df_fe = process_credit_card_balance_streamlit()
+    # Appliquer l'échantillonnage aux fonctions de traitement des données auxiliaires
+    bureau_df_fe = process_bureau_data_streamlit(sample_rows=TEST_AUX_DATA_SAMPLE_ROWS)
+    prev_app_df_fe = process_previous_applications_streamlit(sample_rows=TEST_AUX_DATA_SAMPLE_ROWS)
+    pos_cash_df_fe = process_pos_cash_streamlit(sample_rows=TEST_AUX_DATA_SAMPLE_ROWS)
+    install_payments_df_fe = process_installments_payments_streamlit(sample_rows=TEST_AUX_DATA_SAMPLE_ROWS)
+    credit_card_df_fe = process_credit_card_balance_streamlit(sample_rows=TEST_AUX_DATA_SAMPLE_ROWS)
 
     # 3. Jointure des DataFrames transformés (comme dans votre script MLflow)
     # Ajout de vérifications .empty pour éviter les erreurs de jointure si un chargement a échoué
@@ -811,6 +815,7 @@ def prepare_shap_reference_data(_fitted_preprocessor, expected_features, num_row
     # Appliquez le FE ici pour obtenir les données transformées pour SHAP
     # IMPORTANT : Pour les données de référence SHAP, on ne veut pas que SK_ID_CURR soit traité comme une feature.
     # On s'assure que run_feature_engineering_streamlit le gère correctement.
+    # Utiliser le même échantillonnage pour les données auxiliaires que pour le préprocesseur
     transformed_data = run_feature_engineering_streamlit(raw_data, _fitted_preprocessor, expected_features, is_training_data=True)
 
     if transformed_data is None:
