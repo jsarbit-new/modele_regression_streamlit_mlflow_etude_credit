@@ -36,7 +36,7 @@ AWS_SECRET_ACCESS_KEY = st.secrets["aws"]["aws_secret_access_key"]
 s3_client = boto3.client(
     's3',
     aws_access_key_id=AWS_ACCESS_KEY_ID,
-    aws_access_key_secret=AWS_SECRET_ACCESS_KEY
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY # Correction ici : 'aws_secret_access_key' au lieu de 'aws_access_key_secret'
 )
 
 # --- Fonctions de chargement de données depuis S3 ---
