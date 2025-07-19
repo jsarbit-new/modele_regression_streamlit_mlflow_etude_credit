@@ -703,22 +703,13 @@ def run_feature_engineering_streamlit(raw_df_app, _fitted_preprocessor, expected
     exclude_features_for_preprocessor = ['TARGET', 'SK_ID_CURR', 'index']
     features_for_preprocessor = [f for f in df_fe.columns if f not in exclude_features_for_preprocessor]
     
-    # Récupérer les noms des colonnes après le `fit` du preprocessor
-    # Le `get_feature_names_out()` du ColumnTransformer retourne les noms avec le préfixe du transformer ('num__')
-    preprocessor_fitted_features_full_names = _fitted_preprocessor.get_feature_names_out()
-    # Nettoyer ces noms pour correspondre aux noms de colonnes d'origine avant le préfixe
-    preprocessor_expected_features_clean = [name.replace('num__', '') for name in preprocessor_fitted_features_full_names]
-
     # Créer un DataFrame avec uniquement les colonnes attendues par le préprocesseur, dans le bon ordre
-    # Cela garantit que le DataFrame passé au .transform() a la bonne structure
-    df_features_to_transform = pd.DataFrame(columns=preprocessor_expected_features_clean, index=df_fe.index)
+    df_features_to_transform = pd.DataFrame(columns=features_for_preprocessor, index=df_fe.index)
     
-    for col in preprocessor_expected_features_clean:
+    for col in features_for_preprocessor:
         if col in df_fe.columns:
             df_features_to_transform[col] = df_fe[col]
         else:
-            # Si une colonne attendue par le préprocesseur n'est pas dans df_fe (par exemple, suite à un one-hot encoding sur des valeurs non vues)
-            # il faut la rajouter avec des NaNs pour que le ColumnTransformer puisse la gérer.
             df_features_to_transform[col] = np.nan 
             logger.warning(f"La colonne '{col}' attendue par le préprocesseur n'est pas présente dans le DataFrame transformé. Remplie avec des NaNs.")
 
@@ -732,48 +723,64 @@ def run_feature_engineering_streamlit(raw_df_app, _fitted_preprocessor, expected
         # Appliquer le préprocesseur ajusté
         X_transformed_array = _fitted_preprocessor.transform(df_features_to_transform)
         
-        # Le ColumnTransformer retourne un numpy array. Convertir en DataFrame avec les bons noms de colonnes.
-        X_transformed_df = pd.DataFrame(X_transformed_array, columns=preprocessor_expected_features_clean, index=df_features_to_transform.index)
+        # Le ColumnTransformer retourne un numpy array. Convertir en DataFrame avec les noms de colonnes de l'output du preprocessor.
+        preprocessor_output_feature_names = _fitted_preprocessor.get_feature_names_out()
+        X_transformed_df_descriptive = pd.DataFrame(X_transformed_array, columns=preprocessor_output_feature_names, index=df_features_to_transform.index)
         
-        # S'assurer que le DataFrame final a exactement les mêmes colonnes que celles attendues par le modèle MLflow
-        # Cela est crucial car le modèle a été entraîné avec un ensemble spécifique de features
-        # Gérer les colonnes manquantes (remplir avec 0 ou NaN si le modèle attend une valeur par défaut)
-        # Gérer les colonnes en trop (les supprimer)
+        # --- NOUVELLE LOGIQUE D'ALIGNEMENT DES COLONNES ---
+        final_processed_df = pd.DataFrame(index=X_transformed_df_descriptive.index)
         
-        final_processed_df = pd.DataFrame(index=X_transformed_df.index)
-        missing_in_transformed = []
-        extra_in_transformed = []
+        # Dictionnaire pour stocker le mappage des noms descriptifs aux noms génériques pour les features numériques
+        # Nous devrons construire ce mappage de manière heuristique.
+        # Pour l'instant, nous allons compter les features numériques génériques et les mapper positionnellement.
+        
+        # Séparer les features attendues en génériques et catégorielles d'origine
+        generic_expected_features = [f for f in expected_features if 'feature' in f or 'feat' in f]
+        original_categorical_expected_features = [f for f in expected_features if f not in generic_expected_features]
 
-        for feature in expected_features:
-            if feature in X_transformed_df.columns:
-                final_processed_df[feature] = X_transformed_df[feature]
+        # 1. Traiter les caractéristiques catégorielles d'origine (correspondance directe par nom)
+        for feature_name in original_categorical_expected_features:
+            if feature_name in X_transformed_df_descriptive.columns:
+                final_processed_df[feature_name] = X_transformed_df_descriptive[feature_name]
             else:
-                final_processed_df[feature] = 0.0 # Ou np.nan, selon ce qui est le mieux pour votre modèle
-                missing_in_transformed.append(feature)
+                final_processed_df[feature_name] = 0.0 # Remplir avec une valeur par défaut si manquante
+                logger.warning(f"Caractéristique '{feature_name}' (catégorielle d'origine) attendue mais non trouvée. Remplie avec 0.0.")
 
-        for feature in X_transformed_df.columns:
-            if feature not in expected_features:
-                extra_in_transformed.append(feature)
+        # 2. Traiter les caractéristiques génériques (correspondance positionnelle pour les numériques)
+        # Obtenir les noms des caractéristiques numériques dans le DataFrame transformé (descriptif)
+        numerical_features_in_descriptive_df = [col for col in X_transformed_df_descriptive.columns if col not in original_categorical_expected_features]
+        numerical_features_in_descriptive_df.sort() # Trier pour assurer une correspondance d'ordre cohérente
 
-        if missing_in_transformed:
-            logger.warning(f"Colonnes attendues par le modèle mais manquantes après FE/prétraitement: {missing_in_transformed}. Remplies avec 0.")
-        if extra_in_transformed:
-            logger.warning(f"Colonnes en trop après FE/prétraitement: {extra_in_transformed}. Seront ignorées.")
+        if len(numerical_features_in_descriptive_df) >= len(generic_expected_features):
+            for i, generic_feature_name in enumerate(generic_expected_features):
+                descriptive_source_feature = numerical_features_in_descriptive_df[i]
+                final_processed_df[generic_feature_name] = X_transformed_df_descriptive[descriptive_source_feature]
+        else:
+            logger.warning("Le nombre de caractéristiques descriptives numériques ne correspond pas au nombre de caractéristiques génériques attendues. Remplissage des caractéristiques génériques restantes avec 0.0.")
+            for i, generic_feature_name in enumerate(generic_expected_features):
+                if i < len(numerical_features_in_descriptive_df):
+                    descriptive_source_feature = numerical_features_in_descriptive_df[i]
+                    final_processed_df[generic_feature_name] = X_transformed_df_descriptive[descriptive_source_feature]
+                else:
+                    final_processed_df[generic_feature_name] = 0.0
+
+        # Dernière étape: s'assurer que le DataFrame final a exactement les colonnes attendues dans le bon ordre.
+        # Cela supprimera toutes les colonnes supplémentaires et remplira les NaNs restants avec 0.0.
+        final_processed_df = final_processed_df.reindex(columns=expected_features, fill_value=0.0)
 
         # Restaurer SK_ID_CURR dans le DataFrame de sortie de cette fonction
-        # Il sera retiré juste avant la prédiction du modèle si nécessaire.
         if sk_id_curr is not None:
             final_processed_df['SK_ID_CURR'] = sk_id_curr.values 
             logger.info("SK_ID_CURR ajouté au DataFrame final traité.")
 
         logger.info(f"Fin de l'ingénierie des caractéristiques et prétraitement. Forme finale: {final_processed_df.shape}")
-        del df_fe, df_features_to_transform, X_transformed_array, X_transformed_df # Libérer la mémoire
+        del df_fe, df_features_to_transform, X_transformed_array, X_transformed_df_descriptive # Libérer la mémoire
         gc.collect()
         return final_processed_df
 
     except Exception as e:
-        st.error(f"Erreur lors de l'application du préprocesseur: {e}. Vérifiez la cohérence des features.")
-        logger.error(f"Error applying preprocessor: {e}", exc_info=True)
+        st.error(f"Erreur lors de l'application du préprocesseur ou de l'alignement des features: {e}. Vérifiez la cohérence des features.")
+        logger.error(f"Error applying preprocessor or aligning features: {e}", exc_info=True)
         # S'assurer que SK_ID_CURR est retourné même en cas d'erreur si disponible
         error_df = pd.DataFrame()
         if sk_id_curr is not None:
