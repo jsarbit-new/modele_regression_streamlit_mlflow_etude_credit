@@ -1,384 +1,218 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import mlflow
-import json
-import logging
-import os
-import streamlit.components.v1 as components
+import plotly.graph_objects as go
+import plotly.express as px
 import shap
-from evidently.dashboard import Dashboard
-from evidently.tabs import DataDriftTab
-from sklearn.model_selection import train_test_split
-import boto3 # NEW: Import boto3 for AWS S3 interaction
-from botocore.exceptions import NoCredentialsError # NEW: Import for handling AWS credentials errors
+import mlflow
+import mlflow.pyfunc
+import logging
+import boto3
+from botocore.exceptions import NoCredentialsError, ClientError
+import io
+import os
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
 
-# --- 1. Page Configuration Streamlit ---
-st.set_page_config(
-    page_title="Prédiction de Défaut Client & Surveillance",
-    page_icon="📊",
-    layout="wide"
-)
-
-# --- 2. Logging Configuration ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configuration du logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- 3. AWS S3 Configuration ---
-# REMPLACEZ par le nom EXACT de votre bucket S3
-S3_BUCKET_NAME = "modele-regression-streamlit-mlflow-etude-credit"
-# REMPLACEZ par la région de votre bucket S3 (ex: "eu-west-3" pour Paris)
-AWS_REGION = "eu-west-3" # Assurez-vous que c'est la bonne région de votre bucket S3
+# Désactiver les avertissements Evidently s'ils sont trop nombreux
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="evidently")
 
-# Chemin local temporaire où les fichiers seront téléchargés dans l'environnement Streamlit Cloud
-LOCAL_DOWNLOAD_DIR = "./downloaded_assets"
-os.makedirs(LOCAL_DOWNLOAD_DIR, exist_ok=True) # Crée le dossier local si nécessaire
+# --- Configuration AWS S3 ---
+AWS_S3_BUCKET_NAME = st.secrets["aws"]["bucket_name"]
+AWS_ACCESS_KEY_ID = st.secrets["aws"]["aws_access_key_id"]
+AWS_SECRET_ACCESS_KEY = st.secrets["aws"]["aws_secret_access_key"]
 
-# --- S3 Keys for specific files/directories ---
-# REMPLACEZ par le chemin réel de votre dataset sur S3
-DATASET_S3_KEY = "input/application_train.csv"
-# REMPLACEZ par le préfixe du dossier de votre modèle MLflow sur S3 (doit se terminer par '/')
-# Ex: si votre modèle MLflow est dans s3://your-bucket/modele_mlflow/
-# alors MODEL_S3_KEY_PREFIX = "modele_mlflow/"
-MODEL_S3_KEY_PREFIX = "modele_mlflow/"
+# Initialisation du client S3
+s3_client = boto3.client(
+    's3',
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_key
+)
 
-# --- NEW: Function to download a single file from S3 (cached) ---
-@st.cache_resource
-def download_file_from_s3(s3_key, local_path):
-    """
-    Télécharge un fichier unique depuis S3 vers un chemin local.
-    Les identifiants AWS sont récupérés des secrets Streamlit Cloud.
-    """
+# --- Fonctions de chargement de données et de modèles ---
+
+@st.cache_data(show_spinner="Chargement des données depuis S3...")
+def load_data_from_s3(file_key):
+    """Charge un fichier CSV depuis un bucket S3."""
     try:
-        aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
-        aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
-
-        if not aws_access_key_id or not aws_secret_access_key:
-            st.error("Erreur : Les identifiants AWS (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY) ne sont pas configurés dans les secrets Streamlit.")
-            return None
-
-        s3 = boto3.client(
-            's3',
-            aws_access_key_id=aws_access_key_id,
-            aws_secret_access_key=aws_secret_access_key,
-            region_name=AWS_REGION
-        )
-
-        st.info(f"Téléchargement de '{s3_key}' depuis S3 (bucket: '{S3_BUCKET_NAME}')...")
-        s3.download_file(S3_BUCKET_NAME, s3_key, local_path)
-        st.success(f"Fichier '{s3_key}' téléchargé avec succès vers '{local_path}'!")
-        return local_path
+        obj = s3_client.get_object(Bucket=AWS_S3_BUCKET_NAME, Key=file_key)
+        data = pd.read_csv(io.BytesIO(obj['Body'].read()))
+        logger.info(f"Fichier '{file_key}' chargé avec succès depuis S3.")
+        return data
     except NoCredentialsError:
-        st.error("Erreur d'authentification AWS. Vérifiez vos identifiants AWS dans les secrets Streamlit Cloud.")
+        st.error("Identifiants AWS non trouvés. Veuillez configurer les secrets Streamlit.")
+        logger.error("AWS credentials not found.")
+        return None
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'NoSuchKey':
+            st.error(f"Le fichier '{file_key}' est introuvable dans le bucket S3.")
+            logger.error(f"S3 file not found: {file_key}")
+        else:
+            st.error(f"Erreur lors du chargement depuis S3: {e}")
+            logger.error(f"Error loading from S3: {e}")
         return None
     except Exception as e:
-        st.error(f"Erreur lors du téléchargement de '{s3_key}' depuis S3 : {e}")
-        logger.exception(f"Erreur lors du téléchargement de '{s3_key}' depuis S3:")
+        st.error(f"Une erreur inattendue est survenue lors du chargement des données depuis S3: {e}")
+        logger.error(f"Unexpected error loading data from S3: {e}")
         return None
 
-# --- NEW: Function to download an entire directory (prefix) from S3 (cached) ---
-@st.cache_resource
-def download_s3_directory(s3_prefix, local_dir):
-    """
-    Télécharge tous les objets sous un préfixe S3 donné vers un répertoire local.
-    Utile pour les dossiers de modèles MLflow.
-    """
+@st.cache_resource(show_spinner="Chargement des métadonnées du modèle depuis S3...")
+def load_model_metadata_from_s3(file_key="model_metadata.json"):
+    """Charge les métadonnées du modèle depuis un fichier JSON sur S3."""
     try:
-        aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
-        aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+        obj = s3_client.get_object(Bucket=AWS_S3_BUCKET_NAME, Key=file_key)
+        metadata = pd.read_json(io.BytesIO(obj['Body'].read())) # Utilisez pd.read_json pour la simplicité
+        logger.info("Métadonnées du modèle chargées depuis S3.")
+        return metadata
+    except NoCredentialsError:
+        st.error("Identifiants AWS non trouvés pour les métadonnées du modèle.")
+        logger.error("AWS credentials not found for model metadata.")
+        return None
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'NoSuchKey':
+            st.warning(f"Le fichier de métadonnées '{file_key}' est introuvable dans le bucket S3. Utilisation des métadonnées par défaut si possible.")
+            logger.warning(f"Model metadata file not found: {file_key}")
+            return None
+        else:
+            st.error(f"Erreur lors du chargement des métadonnées depuis S3: {e}")
+            logger.error(f"Error loading model metadata from S3: {e}")
+        return None
+    except Exception as e:
+        st.error(f"Une erreur inattendue est survenue lors du chargement des métadonnées du modèle depuis S3: {e}")
+        logger.error(f"Unexpected error loading model metadata from S3: {e}")
+        return None
 
-        if not aws_access_key_id or not aws_secret_access_key:
-            st.error("Erreur : Les identifiants AWS ne sont pas configurés pour le téléchargement de dossier.")
-            return False
+# --- Chargement local des ressources MLflow ---
 
-        s3 = boto3.client(
-            's3',
-            aws_access_key_id=aws_access_key_id,
-            aws_secret_access_key=aws_secret_access_key,
-            region_name=AWS_REGION
-        )
+@st.cache_resource(show_spinner="Chargement du pipeline MLflow localement...")
+def load_mlflow_pipeline_local(model_local_dir="./downloaded_assets/modele_mlflow"):
+    """
+    Charge un pipeline MLflow depuis un répertoire local.
+    Assurez-vous que le modèle MLflow est bien présent dans ce répertoire.
+    """
+    if not os.path.exists(model_local_dir):
+        # Tenter de télécharger si le répertoire n'existe pas localement
+        st.warning(f"Répertoire du modèle MLflow '{model_local_dir}' non trouvé localement. Tentative de téléchargement depuis S3...")
+        try:
+            download_mlflow_model_from_s3("modele_mlflow", model_local_dir)
+        except Exception as e:
+            st.error(f"Échec du téléchargement du modèle MLflow depuis S3 : {e}")
+            return None
 
-        paginator = s3.get_paginator('list_objects_v2')
-        pages = paginator.paginate(Bucket=S3_BUCKET_NAME, Prefix=s3_prefix)
+    try:
+        pipeline = mlflow.pyfunc.load_model(model_uri=model_local_dir)
+        logger.info("Streamlit: Pipeline chargé depuis './downloaded_assets/modele_mlflow'.")
+        return pipeline
+    except Exception as e:
+        logger.error(f"Erreur lors du chargement du pipeline MLflow: {e}", exc_info=True)
+        st.error(f"Erreur lors du chargement du pipeline MLflow : {e}. Assurez-vous que le modèle est compatible avec les dépendances installées.")
+        return None
 
-        os.makedirs(local_dir, exist_ok=True)
+@st.cache_resource(show_spinner="Téléchargement du modèle MLflow depuis S3...")
+def download_mlflow_model_from_s3(s3_prefix, local_dir):
+    """Télécharge un modèle MLflow complet (répertoire) depuis S3."""
+    if os.path.exists(local_dir):
+        logger.info(f"Le répertoire local '{local_dir}' existe déjà, pas de téléchargement nécessaire.")
+        return
 
-        st.info(f"Téléchargement du dossier '{s3_prefix}' depuis S3 (bucket: '{S3_BUCKET_NAME}')...")
-        files_downloaded = 0
+    os.makedirs(local_dir, exist_ok=True)
+    try:
+        paginator = s3_client.get_paginator('list_objects_v2')
+        pages = paginator.paginate(Bucket=AWS_S3_BUCKET_NAME, Prefix=s3_prefix)
+
         for page in pages:
             if "Contents" in page:
                 for obj in page["Contents"]:
-                    s3_key = obj["Key"]
-                    # Skip directories themselves if they appear as objects
-                    if s3_key.endswith('/'):
-                        continue
-                    
-                    # Construct local path, preserving subdirectories
-                    relative_path = os.path.relpath(s3_key, s3_prefix)
-                    local_path = os.path.join(local_dir, relative_path)
-                    
-                    # Ensure local directory exists for the file
-                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                    
-                    # Only download if the file doesn't exist or is different (optional, for robustness)
-                    # For simplicity, we re-download every time for @st.cache_resource
-                    s3.download_file(S3_BUCKET_NAME, s3_key, local_path)
-                    files_downloaded += 1
-        
-        if files_downloaded > 0:
-            st.success(f"Dossier '{s3_prefix}' téléchargé avec succès vers '{local_dir}' ({files_downloaded} fichiers)!")
-            return True
-        else:
-            st.warning(f"Aucun fichier trouvé sous le préfixe '{s3_prefix}' dans le bucket '{S3_BUCKET_NAME}'.")
-            return False
+                    object_key = obj["Key"]
+                    # Créer la structure de répertoire locale
+                    local_file_path = os.path.join(local_dir, os.path.relpath(object_key, s3_prefix))
+                    os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
 
+                    if not object_key.endswith('/'): # Ignorer les 'dossiers' S3
+                        s3_client.download_file(AWS_S3_BUCKET_NAME, object_key, local_file_path)
+                        logger.info(f"Téléchargé : {object_key} vers {local_file_path}")
+            else:
+                st.warning(f"Aucun objet trouvé sous le préfixe S3: {s3_prefix}")
+                logger.warning(f"No objects found under S3 prefix: {s3_prefix}")
+                return # Sortir si rien n'est trouvé
+        logger.info(f"Modèle MLflow téléchargé avec succès depuis S3 '{s3_prefix}' vers '{local_dir}'.")
     except NoCredentialsError:
-        st.error("Erreur d'authentification AWS. Vérifiez vos identifiants AWS dans les secrets Streamlit Cloud.")
-        return False
+        st.error("Identifiants AWS non trouvés pour le téléchargement du modèle MLflow.")
+        logger.error("AWS credentials not found for MLflow model download.")
+        raise
+    except ClientError as e:
+        st.error(f"Erreur Client S3 lors du téléchargement du modèle MLflow: {e}")
+        logger.error(f"S3 Client Error during MLflow model download: {e}")
+        raise
     except Exception as e:
-        st.error(f"Erreur lors du téléchargement du dossier '{s3_prefix}' depuis S3 : {e}")
-        logger.exception(f"Erreur lors du téléchargement du dossier '{s3_prefix}' depuis S3:")
-        return False
+        st.error(f"Une erreur inattendue est survenue lors du téléchargement du modèle MLflow: {e}")
+        logger.error(f"Unexpected error during MLflow model download: {e}")
+        raise
 
 
-# --- 4. Feature Engineering Functions (Stubs) ---
-# Dictionnaire des variables importantes à afficher dans l'interface
-SHAP_IMPORTANT_FEATURES_INFO = {
-    "AMT_CREDIT": {"display_name": "Montant du Prêt", "min_val": 50000.0, "max_val": 2000000.0},
-    "AMT_ANNUITY": {"display_name": "Montant Annuité", "min_val": 1000.0, "max_val": 100000.0},
-    "app_feature_15": {"display_name": "Ratio Crédit/Annuité", "min_val": 0.01, "max_val": 10.0},
-    "app_feature_33": {"display_name": "Ancienneté Emploi (années)", "min_val": 0.0, "max_val": 50.0},
-    "app_feature_21": {"display_name": "Taux Population Région", "min_val": 0.001, "max_val": 0.1},
-    "app_feature_19": {"display_name": "Source Extérieure 1", "min_val": 0.0, "max_val": 1.0},
-    "app_feature_31": {"display_name": "Source Extérieure 2", "min_val": 0.0, "max_val": 1.0},
-    "app_feature_24": {"display_name": "Source Extérieure 3", "min_val": 0.0, "max_val": 1.0},
-    "app_feature_45": {"display_name": "Nombre Enfants", "min_val": 0.0, "max_val": 10.0},
-    "app_feature_17": {"display_name": "Age Client (années)", "min_val": 18.0, "max_val": 70.0},
-}
+# --- Préparation des données d'entraînement (pour SHAP et Data Drift) ---
 
-# NOUVEAU: Dictionnaire de noms descriptifs pour TOUTES les variables
-FULL_DESCRIPTIVE_NAMES = {
-    # Variables ajoutées dans l'interface
-    "AMT_CREDIT": "Montant du Prêt",
-    "AMT_ANNUITY": "Montant Annuité",
-    
-    # Variables de la famille 'app_feature'
-    "app_feature_15": "Ratio Crédit/Annuité",
-    "app_feature_33": "Ancienneté Emploi (années)",
-    "app_feature_21": "Taux Population Région",
-    "app_feature_19": "Source Extérieure 1",
-    "app_feature_31": "Source Extérieure 2",
-    "app_feature_24": "Source Extérieure 3",
-    "app_feature_45": "Nombre Enfants",
-    "app_feature_17": "Age Client (années)",
-    "app_feature_0": "Statut de la demande",
-    "app_feature_1": "Statut de propriété",
-    "app_feature_2": "Montant du bien",
-    "app_feature_3": "Type de logement",
-    "app_feature_4": "Type de famille",
-    "app_feature_5": "Nb de jours depuis l'enregistrement",
-    "app_feature_6": "Score 1 du client",
-    "app_feature_7": "Score 2 du client",
-    "app_feature_8": "Score 3 du client",
-    "app_feature_9": "Nb d'enquêtes récentes",
-    "app_feature_10": "Dernier changement d'ID",
-    "app_feature_11": "Dernier changement de document",
-    "app_feature_12": "Score financier 1",
-    "app_feature_13": "Score financier 2",
-    "app_feature_14": "Score financier 3",
-    "app_feature_18": "Ratio Annuité/Revenu",
-    "app_feature_20": "Type de paiement",
-    "app_feature_22": "Score de crédit Bureau",
-    "app_feature_23": "Nb de paiements manqués",
-    "app_feature_25": "Ratio dette/revenu",
-    "app_feature_26": "Nb de crédits en cours",
-    "app_feature_27": "Nb de demandes par téléphone",
-    "app_feature_28": "Nb de crédits renouvelables",
-    "app_feature_29": "Nb de crédits soldés",
-    "app_feature_30": "Montant de l'assurance",
-    "app_feature_32": "Nb de jours depuis le dernier crédit",
-    "app_feature_34": "Dernier changement de contact",
-    "app_feature_35": "Dernière mise à jour d'info",
-    "app_feature_36": "Montant des pénalités",
-    "app_feature_37": "Montant des arriérés",
-    "app_feature_38": "Nb de jours depuis le dernier contact",
-    "app_feature_39": "Montant des paiements réguliers",
-    "app_feature_40": "Ratio paiements/solde",
-    "app_feature_41": "Nb de jours depuis le dernier paiement",
-    "app_feature_42": "Dernier montant remboursé",
-    "app_feature_43": "Nb de jours depuis le début du prêt",
-    "app_feature_44": "Nb de paiements totaux",
-    "app_feature_46": "Nb de paiements manqués totaux",
-    "app_feature_47": "Montant total de la dette",
-    "app_feature_48": "Ancienneté du crédit bureau",
-    "app_feature_49": "Ratio crédit/revenu",
-    
-    # Variables des autres sources de données
-    "bureau_feat_0": "Crédits Bureau",
-    "bureau_feat_1": "Durée des crédits Bureau",
-    "bureau_feat_2": "Ancienneté des crédits Bureau",
-    "bureau_feat_3": "Dettes Bureau",
-    "bureau_feat_4": "Crédits en cours Bureau",
-    "prev_app_feat_0": "Ancienneté demandes précédentes",
-    "prev_app_feat_1": "Taux d'acceptation demandes précédentes",
-    "prev_app_feat_2": "Montant moyen demandes précédentes",
-    "prev_app_feat_3": "Durée moyenne demandes précédentes",
-    "prev_app_feat_4": "Ratio de remboursement demandes précédentes",
-    "pos_feat_0": "Ancienneté POS Cash",
-    "pos_feat_1": "Nb de paiements POS Cash",
-    "pos_feat_2": "Montant POS Cash",
-    "pos_feat_3": "Jours de retard POS Cash",
-    "pos_feat_4": "Statut de paiement POS Cash",
-    "install_feat_0": "Ancienneté Paiements acomptes",
-    "install_feat_1": "Nb de paiements acomptes",
-    "install_feat_2": "Montant paiements acomptes",
-    "install_feat_3": "Paiements en retard acomptes",
-    "install_feat_4": "Ratio paiement/facture acomptes",
-    "cc_feat_0": "Ancienneté Carte de Crédit",
-    "cc_feat_1": "Nb de transactions Carte de Crédit",
-    "cc_feat_2": "Montant solde Carte de Crédit",
-    "cc_feat_3": "Utilisation de la limite Carte de Crédit",
-    "cc_feat_4": "Paiements en retard Carte de Crédit",
-    
-    # Mapping pour les variables catégorielles
-    "NAME_CONTRACT_TYPE": "Type de Contrat",
-    "CODE_GENDER": "Sexe",
-    "FLAG_OWN_CAR": "Possède une Voiture",
-    "NAME_INCOME_TYPE": "Type de Revenu",
-}
-
-# --- Fonctions Stub pour la Génération de Données (utilisées pour la démo) ---
-@st.cache_data(show_spinner="Chargement des données...")
-def load_application_data_stub(num_rows=None):
-    """
-    Charge et retourne les données depuis S3.
-    Cette fonction ne s'exécutera qu'une seule fois.
-    Args:
-        num_rows (int, optional): Nombre de lignes à lire. Si None, lit 100 lignes.
-    """
+@st.cache_data(show_spinner="Chargement des données d'entraînement pour SHAP et Data Drift...")
+def load_training_data_for_shap(file_key="data/application_train.csv"):
+    """Charge les données d'entraînement complètes pour les calculs SHAP et Data Drift."""
     try:
-        # Définir le chemin local pour le dataset téléchargé
-        dataset_local_path = os.path.join(LOCAL_DOWNLOAD_DIR, os.path.basename(DATASET_S3_KEY))
-        
-        # Télécharger le dataset depuis S3
-        downloaded_path = download_file_from_s3(DATASET_S3_KEY, dataset_local_path)
-        
-        if downloaded_path is None:
-            st.error("Impossible de télécharger le fichier de données depuis S3.")
-            return None
-
-        # Load data from the downloaded local path
-        if num_rows is None:
-            df = pd.read_csv(downloaded_path, nrows=100)
-        else:
-            df = pd.read_csv(downloaded_path, nrows=num_rows)
-        return df
+        data = load_data_from_s3(file_key)
+        if data is not None:
+            # Assurez-vous que TARGET est géré si nécessaire
+            if 'TARGET' in data.columns:
+                data = data.drop(columns=['TARGET'], errors='ignore')
+            logger.info("Données d'entraînement pour SHAP et Data Drift chargées.")
+            return data
+        return None
     except Exception as e:
-        st.error(f"Erreur lors du chargement des données depuis '{DATASET_S3_KEY}' : {e}")
-        logger.exception("Erreur lors du chargement des données d'application:")
+        st.error(f"Erreur lors du chargement des données d'entraînement pour SHAP: {e}")
+        logger.error(f"Error loading training data for SHAP: {e}")
         return None
 
-@st.cache_data(show_spinner="Traitement des données Bureau...")
-def process_bureau_data_stub(df):
-    if df is None: return None # Propagate None if previous step failed
-    for i in range(5):
-        if f'bureau_feat_{i}' not in df.columns:
-            df[f'bureau_feat_{i}'] = np.random.rand(len(df))
-    return df
+# --- Ingénierie des Caractéristiques pour les données de référence SHAP (simplifié) ---
 
-@st.cache_data(show_spinner="Traitement des demandes précédentes...")
-def process_previous_applications_data_stub(df):
-    if df is None: return None # Propagate None if previous step failed
-    for i in range(5):
-        if f'prev_app_feat_{i}' not in df.columns:
-            df[f'prev_app_feat_{i}'] = np.random.rand(len(df))
-    return df
+# Note : Dans une application réelle, cette fonction devrait répliquer EXACTEMENT
+# l'étape de pré-traitement de votre pipeline scikit-learn avant le modèle.
+# Ici, nous allons la laisser simple pour correspondre aux colonnes brutes.
+# Si votre pipeline inclut un préprocesseur qui modifie le nombre/nom des colonnes,
+# cette fonction devrait le refléter pour que SHAP soit précis sur les features pré-traitées.
 
-@st.cache_data(show_spinner="Traitement des données POS Cash...")
-def process_pos_cash_data_stub(df):
-    if df is None: return None # Propagate None if previous step failed
-    for i in range(5):
-        if f'pos_feat_{i}' not in df.columns:
-            df[f'pos_feat_{i}'] = np.random.rand(len(df))
-    return df
-
-@st.cache_data(show_spinner="Traitement des paiements d'acomptes...")
-def process_installments_payments_data_stub(df):
-    if df is None: return None # Propagate None if previous step failed
-    for i in range(5):
-        if f'install_feat_{i}' not in df.columns:
-            df[f'install_feat_{i}'] = np.random.rand(len(df))
-    return df
-
-@st.cache_data(show_spinner="Traitement des données de carte de crédit...")
-def process_credit_card_balance_data_stub(df):
-    if df is None: return None # Propagate None if previous step failed
-    for i in range(5):
-        if f'cc_feat_{i}' not in df.columns:
-            df[f'cc_feat_{i}'] = np.random.rand(len(df))
-    return df
-
-@st.cache_data(show_spinner="Exécution du pipeline d'ingénierie des caractéristiques...")
-def run_feature_engineering_pipeline(num_rows):
-    # Pass num_rows to load_application_data_stub to limit initial data load
-    df = load_application_data_stub(num_rows=num_rows)
-    if df is None:
-        return None # Return None if initial data loading failed
-    df = process_bureau_data_stub(df)
-    if df is None: return None
-    df = process_previous_applications_data_stub(df)
-    if df is None: return None
-    df = process_pos_cash_data_stub(df)
-    if df is None: return None
-    df = process_installments_payments_data_stub(df)
-    if df is None: return None
-    df = process_credit_card_balance_data_stub(df)
-    return df
-
-# --- 5. Loading Functions (Cached) ---
-# Cette fonction est modifiée pour charger les métadonnées en dur
-# car nous ne nous connectons plus à un serveur MLflow distant.
-@st.cache_resource(show_spinner="Chargement des métadonnées du modèle...")
-def load_model_metadata_local():
-    # Utilisation des dictionnaires définis directement dans le script
-    features_info = SHAP_IMPORTANT_FEATURES_INFO
-    optimal_threshold = 0.5 # Valeur par défaut, ajustez si nécessaire
-    
-    # Génération des noms de colonnes via le stub pour simuler les features d'entraînement
-    # Only need 1 row to get column names, so this is efficient.
-    dummy_data = run_feature_engineering_pipeline(num_rows=1)
-    if dummy_data is None:
-        logger.error("Failed to load dummy data for model metadata. Returning None for metadata.")
-        return None, None, None # Return None for all values to indicate failure
-
-    all_training_features = list(dummy_data.columns)
-    
-    logger.info("Métadonnées du modèle chargées localement.")
-    return features_info, optimal_threshold, all_training_features
-
-@st.cache_resource(show_spinner="Chargement du pipeline du modèle...")
-def load_mlflow_pipeline_local():
+@st.cache_data(show_spinner="Préparation des données pour l'ingénierie des caractéristiques...")
+def run_feature_engineering_pipeline(num_rows=None):
     """
-    Charge le pipeline MLflow en le téléchargeant depuis S3.
+    Simule une partie de l'ingénierie des caractéristiques pour obtenir des données brutes
+    à utiliser comme base pour SHAP et le préprocesseur.
     """
-    # Define the local path where the MLflow model directory will be downloaded
-    model_local_dir = os.path.join(LOCAL_DOWNLOAD_DIR, os.path.basename(MODEL_S3_KEY_PREFIX.strip('/')))
-
-    # Download the entire MLflow model directory from S3
-    if not download_s3_directory(MODEL_S3_KEY_PREFIX, model_local_dir):
-        st.error("Impossible de télécharger le dossier du modèle MLflow depuis S3.")
+    raw_data = load_training_data_for_shap()
+    if raw_data is None:
         return None
+    
+    # Ici, vous devriez inclure les étapes de votre pipeline qui transforment les données
+    # brutes en données que votre modèle attend.
+    # Pour l'instant, on retourne un échantillon des données brutes.
+    if num_rows:
+        return raw_data.sample(min(num_rows, len(raw_data)), random_state=42)
+    return raw_data
 
-    try:
-        # Now load the model from the local downloaded directory
-        pipeline = mlflow.pyfunc.load_model(model_uri=model_local_dir)
-        logger.info(f"Streamlit: Pipeline chargé depuis '{model_local_dir}'.")
-        return pipeline
-    except Exception as e:
-        st.error(f"Échec lors du chargement du pipeline MLflow localement après téléchargement S3: {e}")
-        st.info(f"Assurez-vous que le dossier '{model_local_dir}' existe et contient un modèle MLflow valide.")
-        logger.exception("Erreur lors du chargement du pipeline MLflow:")
-        return None
+# --- Explication SHAP ---
+
+class IdentityPreprocessor:
+    """Un préprocesseur factice qui ne fait rien. Utilisé quand aucun préprocesseur explicite n'est trouvé."""
+    def transform(self, X):
+        return X
+    def get_feature_names_out(self, input_features=None):
+        if input_features is not None:
+            return input_features
+        # Fallback pour les cas où input_features n'est pas fourni et la transformation ne modifie pas les noms
+        return [f"col_{i}" for i in range(X.shape[1])] if hasattr(X, 'shape') else []
+
 
 @st.cache_resource(show_spinner="Calcul de l'explainer SHAP...")
 def load_shap_explainer(_pyfunc_pipeline, all_training_features):
@@ -390,32 +224,45 @@ def load_shap_explainer(_pyfunc_pipeline, all_training_features):
     Returns:
         tuple: (shap.Explainer, preprocessor) ou (None, None) en cas d'échec.
     """
-    # Tente d'extraire le pipeline scikit-learn sous-jacent
-    # Si le modèle a été enregistré avec mlflow.sklearn.log_model, _model_impl devrait être le pipeline sklearn
-    sklearn_pipeline = None
+    # Tente d'extraire le modèle scikit-learn sous-jacent
+    # Si le modèle a été enregistré avec mlflow.sklearn.log_model, _model_impl devrait être le modèle/pipeline sklearn
+    sklearn_model_or_pipeline = None
     if hasattr(_pyfunc_pipeline, '_model_impl'):
-        sklearn_pipeline = _pyfunc_pipeline._model_impl
+        sklearn_model_or_pipeline = _pyfunc_pipeline._model_impl
     
-    if sklearn_pipeline is None or not hasattr(sklearn_pipeline, 'named_steps'):
-        st.error("Impossible d'extraire le pipeline scikit-learn du modèle MLflow. L'explainer SHAP ne peut pas être initialisé correctement.")
-        logger.error("Could not extract a scikit-learn Pipeline with named_steps from the MLflow PyFuncModel.")
+    if sklearn_model_or_pipeline is None:
+        st.error("Impossible d'extraire le modèle/pipeline scikit-learn du modèle MLflow. L'explainer SHAP ne peut pas être initialisé correctement.")
+        logger.error("Could not extract a scikit-learn model or Pipeline from the MLflow PyFuncModel.")
         return None, None # Retourne None pour l'explainer et le préprocesseur en cas d'échec
 
-    # Maintenant, utilise sklearn_pipeline pour obtenir le préprocesseur et le modèle final
-    if 'preprocessor' in sklearn_pipeline.named_steps:
-        preprocessor = sklearn_pipeline.named_steps['preprocessor']
+    preprocessor = None
+    final_model = None
+
+    # Vérifie si c'est un Pipeline scikit-learn
+    if isinstance(sklearn_model_or_pipeline, Pipeline) or hasattr(sklearn_model_or_pipeline, 'named_steps'):
+        logger.info("Modèle MLflow chargé est reconnu comme un Pipeline scikit-learn.")
+        # C'est un pipeline, extrayons le préprocesseur et le modèle final
+        if 'preprocessor' in sklearn_model_or_pipeline.named_steps:
+            preprocessor = sklearn_model_or_pipeline.named_steps['preprocessor']
+            logger.info("Préprocesseur nommé 'preprocessor' trouvé dans le pipeline.")
+        else:
+            logger.warning("Le pipeline scikit-learn ne contient pas d'étape nommée 'preprocessor'. Utilisation d'IdentityPreprocessor.")
+            preprocessor = IdentityPreprocessor()
+        
+        # Le modèle final est généralement la dernière étape du pipeline
+        final_model = sklearn_model_or_pipeline.steps[-1][1] 
+        logger.info(f"Modèle final extrait du pipeline: {type(final_model)}")
     else:
-        logger.warning("Le pipeline scikit-learn ne contient pas d'étape nommée 'preprocessor'. SHAP pourrait nécessiter un ajustement.")
-        # Fallback vers un IdentityPreprocessor si l'étape 'preprocessor' n'est pas trouvée
-        class IdentityPreprocessor:
-            def transform(self, X): return X
-            def get_feature_names_out(self, input_features=None):
-                if input_features is not None and isinstance(input_features, list):
-                    return input_features
-                return [] # Fallback, can't infer from X here
+        # Si ce n'est pas un pipeline avec named_steps, c'est probablement le modèle final directement
+        logger.info("Le modèle MLflow chargé n'est pas un pipeline scikit-learn avec 'named_steps'. Traitement comme un modèle final direct.")
+        final_model = sklearn_model_or_pipeline
+        # Dans ce cas, nous n'avons pas de préprocesseur explicite, utilisons un IdentityPreprocessor
         preprocessor = IdentityPreprocessor()
-    
-    final_model = sklearn_pipeline.steps[-1][1] # La dernière étape du pipeline sklearn est le modèle final
+
+    if final_model is None:
+        st.error("Impossible d'identifier le modèle final pour l'explainer SHAP.")
+        logger.error("Final model could not be extracted or identified.")
+        return None, None
 
     # Génère les données de référence pour l'explainer SHAP
     ref_data_raw = run_feature_engineering_pipeline(num_rows=1000) # Garde 1000 lignes pour la référence SHAP
@@ -423,256 +270,250 @@ def load_shap_explainer(_pyfunc_pipeline, all_training_features):
         st.error("Impossible de charger les données de référence pour l'explainer SHAP.")
         return None, None
 
+    # S'assurer que seules les colonnes d'entraînement sont utilisées
     ref_data_raw_filtered = ref_data_raw[all_training_features]
+    
+    # Appliquer le préprocesseur pour obtenir les données traitées
     ref_data_processed = preprocessor.transform(ref_data_raw_filtered)
     
+    # Obtenir les noms des caractéristiques après prétraitement
+    processed_feature_names = all_training_features # Fallback
     try:
+        if hasattr(preprocessor, 'get_feature_names_out') and callable(preprocessor.get_feature_names_out):
+            # Tente avec input_features pour ColumnTransformer
+            try:
+                processed_feature_names = preprocessor.get_feature_names_out(input_features=all_training_features)
+            except TypeError: # Si get_feature_names_out ne prend pas input_features
+                processed_feature_names = preprocessor.get_feature_names_out()
+        elif hasattr(ref_data_processed, 'columns'): # Si c'est un DataFrame après transformation
+            processed_feature_names = ref_data_processed.columns.tolist()
+        else:
+            processed_feature_names = [f"col_{i}" for i in range(ref_data_processed.shape[1])]
+            logger.warning("Impossible d'obtenir les noms de features du préprocesseur. Noms génériques utilisés.")
+    except Exception as e:
+        logger.warning(f"Erreur lors de l'appel de get_feature_names_out ou extraction des colonnes: {e}. Noms génériques utilisés.")
+        processed_feature_names = [f"col_{i}" for i in range(ref_data_processed.shape[1])]
+
+
+    # Assurez-vous que ref_data_processed est un DataFrame pour SHAP
+    ref_data_df = pd.DataFrame(ref_data_processed, columns=processed_feature_names)
+    
+    # Utilisation de shap.Explainer avec le modèle final et les données de référence
+    explainer = shap.Explainer(final_model, ref_data_df)
+    return explainer, preprocessor
+
+
+# --- Fonctions d'affichage ---
+
+def plot_feature_importance(explainer, shap_values, feature_names, top_n=10):
+    """Affiche les importances globales des caractéristiques SHAP."""
+    if explainer is None or shap_values is None or not feature_names:
+        st.warning("Impossible d'afficher l'importance des caractéristiques : données SHAP manquantes.")
+        return
+
+    # S'assurer que shap_values a la bonne forme et que c'est bien numpy array
+    if isinstance(shap_values, list): # Si c'est une liste de valeurs SHAP (pour plusieurs sorties)
+        shap_values_abs_mean = np.abs(np.array(shap_values[0])).mean(0)
+    else: # Pour une seule sortie ou direct
+        shap_values_abs_mean = np.abs(np.array(shap_values)).mean(0)
+
+    if len(shap_values_abs_mean) != len(feature_names):
+        st.error(f"Incohérence entre les valeurs SHAP ({len(shap_values_abs_mean)}) et les noms de features ({len(feature_names)}).")
+        return
+
+    df_importance = pd.DataFrame({
+        'Feature': feature_names,
+        'SHAP_Importance': shap_values_abs_mean
+    }).sort_values(by='SHAP_Importance', ascending=False)
+
+    fig = px.bar(
+        df_importance.head(top_n),
+        x='SHAP_Importance',
+        y='Feature',
+        orientation='h',
+        title=f'Top {top_n} Importances des Caractéristiques (Moyenne Absolue des Valeurs SHAP)',
+        labels={'SHAP_Importance': 'Importance SHAP (Moyenne Absolue)', 'Feature': 'Caractéristique'},
+        color_discrete_sequence=px.colors.qualitative.Plotly
+    )
+    fig.update_layout(yaxis={'categoryorder': 'total ascending'})
+    st.plotly_chart(fig, use_container_width=True)
+
+def plot_individual_explanation(explainer, shap_values_individual, processed_features_df, feature_names, client_id):
+    """Affiche l'explication SHAP pour un client individuel."""
+    if explainer is None or shap_values_individual is None or processed_features_df is None:
+        st.warning("Impossible d'afficher l'explication individuelle : données SHAP manquantes.")
+        return
+    
+    # Assurez-vous que shap_values_individual est bien un tableau numpy
+    if isinstance(shap_values_individual, list):
+        # Pour le cas où le modèle a plusieurs sorties, prenons la première pour l'explication individuelle
+        shap_values_individual = shap_values_individual[0] 
+
+    try:
+        # Utilisez shap.waterfall_plot directement.
+        # Il nécessite un shap.Explanation objet, qui peut être créé.
+        # Si explainer est un TreeExplainer ou KernelExplainer, base_values est direct.
+        # Sinon, il faut le récupérer depuis l'explainer ou le calculer (e.g., np.mean(explainer.expected_value)).
+        
+        # Pour shap.Explainer générique, expected_value est un attribut
+        expected_value = explainer.expected_value
+        
+        # S'assurer que processed_features_df est un DataFrame pandas pour l'indexation
+        if not isinstance(processed_features_df, pd.DataFrame):
+            processed_features_df = pd.DataFrame([processed_features_df], columns=feature_names)
+            
+        shap.initjs() # Initialise JavaScript pour les plots SHAP
+        
+        fig, ax = plt.subplots(figsize=(10, 6))
+        shap.waterfall_plot(
+            shap.Explanation(
+                values=shap_values_individual, 
+                base_values=expected_value, 
+                data=processed_features_df.iloc[0].values, 
+                feature_names=feature_names
+            ),
+            max_display=20,
+            show=False, # Important: ne pas afficher directement, laisser Streamlit le faire
+            ax=ax
+        )
+        ax.set_title(f"Explication SHAP pour le client {client_id}")
+        st.pyplot(fig) # Utilisez st.pyplot pour afficher le plot matplotlib
+        plt.close(fig) # Fermez la figure pour libérer la mémoire
+
+    except Exception as e:
+        st.error(f"Erreur lors de l'affichage de l'explication SHAP individuelle : {e}")
+        logger.error(f"Error plotting individual SHAP explanation: {e}", exc_info=True)
+
+
+# --- Fonctions principales de l'application Streamlit ---
+
+st.set_page_config(layout="wide", page_title="Prédiction de Risque de Crédit et Explicabilité")
+
+st.title("Tableau de Bord de Prédiction de Risque de Crédit")
+st.write("Cette application prédit le risque de défaut de paiement pour les demandes de crédit et fournit des explications sur les prédictions.")
+
+# Chargement des données et du modèle
+data = load_data_from_s3("data/application_test.csv")
+if data is None:
+    st.stop() # Arrêter l'exécution si les données ne sont pas chargées
+
+# Chargement des métadonnées du modèle
+model_metadata = load_model_metadata_from_s3()
+if model_metadata is None:
+    st.error("Impossible de charger les métadonnées du modèle. Certaines fonctionnalités pourraient être limitées.")
+    # Définir des valeurs par défaut si les métadonnées ne sont pas disponibles
+    all_training_features = data.columns.tolist() # Fallback, à ajuster si besoin
+    threshold = 0.5 # Valeur par défaut si non trouvée
+else:
+    all_training_features = model_metadata['training_features'].tolist() if 'training_features' in model_metadata else data.columns.tolist()
+    threshold = model_metadata.get('threshold', 0.5) # Récupère le seuil ou utilise 0.5 par défaut
+    
+    # Assurez-vous que les colonnes nécessaires sont présentes dans 'data'
+    missing_features_in_data = [f for f in all_training_features if f not in data.columns]
+    if missing_features_in_data:
+        st.warning(f"Attention : Les caractéristiques suivantes du modèle sont manquantes dans les données de test : {', '.join(missing_features_in_data)}. Le modèle pourrait ne pas fonctionner comme prévu.")
+        # Filtrer all_training_features pour ne garder que celles qui sont dans `data`
+        all_training_features = [f for f in all_training_features if f in data.columns]
+
+
+# Chargement du pipeline MLflow
+pipeline = load_mlflow_pipeline_local()
+if pipeline is None:
+    st.stop() # Arrêter l'exécution si le pipeline ne peut pas être chargé
+
+
+# --- Sidebar pour la sélection du client ---
+st.sidebar.header("Sélection du Client")
+client_ids = data['SK_ID_CURR'].tolist()
+selected_client_id = st.sidebar.selectbox("Sélectionnez un ID Client :", client_ids)
+
+# Trouver les données du client sélectionné
+client_data_raw = data[data['SK_ID_CURR'] == selected_client_id].drop(columns=['SK_ID_CURR']).iloc[0]
+client_data_df_input = pd.DataFrame([client_data_raw]) # Pour l'entrée du pipeline
+
+# Prétraiter les données du client pour la prédiction
+# Assurez-vous que seules les features attendues par le pipeline sont passées
+client_data_filtered_for_pipeline = client_data_df_input[all_training_features]
+
+# --- Prédiction ---
+with st.spinner("Calcul de la prédiction..."):
+    try:
+        prediction_proba = pipeline.predict(client_data_filtered_for_pipeline)[0]
+        prediction = (prediction_proba >= threshold).astype(int)
+        
+        st.subheader("Résultat de la Prédiction")
+        col_pred, col_proba = st.columns(2)
+        with col_pred:
+            if prediction == 1:
+                st.error(f"**Prédiction : Risque Élevé de Défaut (Crédit Refusé)**")
+            else:
+                st.success(f"**Prédiction : Faible Risque de Défaut (Crédit Accordé)**")
+        with col_proba:
+            st.info(f"Probabilité de défaut : **{prediction_proba:.2f}**")
+            st.info(f"Seuil de décision : **{threshold:.2f}**")
+    except Exception as e:
+        st.error(f"Erreur lors de la prédiction pour le client : {e}")
+        logger.error(f"Prediction error for client {selected_client_id}: {e}", exc_info=True)
+        prediction_proba = None
+        prediction = None
+
+st.write("---")
+
+# --- Explication SHAP ---
+st.subheader("Explication SHAP de la Prédiction")
+
+# Charger l'explainer SHAP et le préprocesseur
+explainer, preprocessor = load_shap_explainer(pipeline, all_training_features)
+
+if explainer is not None and preprocessor is not None:
+    try:
+        # Prétraiter les données du client pour SHAP avec le préprocesseur extrait
+        client_data_processed_for_shap = preprocessor.transform(client_data_filtered_for_pipeline)
+
+        # Récupérer les noms des features après prétraitement si le préprocesseur le permet
         if hasattr(preprocessor, 'get_feature_names_out') and callable(preprocessor.get_feature_names_out):
             try:
                 processed_feature_names = preprocessor.get_feature_names_out(input_features=all_training_features)
             except TypeError:
                 processed_feature_names = preprocessor.get_feature_names_out()
         else:
-            processed_feature_names = [f"col_{i}" for i in range(ref_data_processed.shape[1])]
-            logger.warning("Impossible d'obtenir les noms de features du préprocesseur. Noms génériques utilisés.")
-    except Exception as e:
-        logger.warning(f"Erreur lors de l'appel de get_feature_names_out: {e}. Noms génériques utilisés.")
-        processed_feature_names = [f"col_{i}" for i in range(ref_data_processed.shape[1])]
+            processed_feature_names = [f"col_{i}" for i in range(client_data_processed_for_shap.shape[1])]
+            logger.warning("Impossible d'obtenir les noms de features du préprocesseur pour SHAP. Noms génériques utilisés.")
 
-    ref_data_df = pd.DataFrame(ref_data_processed, columns=processed_feature_names)
-    
-    explainer = shap.Explainer(final_model, ref_data_df)
-    return explainer, preprocessor
-
-@st.cache_data(show_spinner="Génération des données de référence pour le drift...")
-def load_reference_data_for_drift():
-    try:
-        # Utilise la fonction stub pour générer des données de référence
-        # RÉDUIT LE NOMBRE DE LIGNES POUR ÉCONOMISER LA MÉMOIRE SUR STREAMLIT CLOUD
-        reference_df = run_feature_engineering_pipeline(num_rows=5000) # Réduit de 30000 à 5000
-        if reference_df is None:
-            st.error("Impossible de générer le rapport Evidently : données de référence manquantes.")
-            return None
-        logger.info(f"Données de référence chargées avec succès. Nombre d'échantillons: {len(reference_df)}")
-        return reference_df
-    except Exception as e:
-        st.error(f"Erreur lors du chargement des données de référence : {e}")
-        logger.exception("Erreur lors du chargement des données de référence dans Streamlit:")
-        return None
-
-# --- Fonctions d'Affichage des Rapports ---
-def generate_and_display_evidently_report(reference_df, current_df):
-    try:
-        if reference_df is None or current_df is None:
-            st.warning("Impossible de générer le rapport Evidently : données de référence ou actuelles manquantes.")
-            return
-
-        st.info("Génération du rapport en cours. Cela peut prendre quelques instants...")
-        report_file_path = os.path.join(LOCAL_DOWNLOAD_DIR, "evidently_data_drift_report_temp.html")
-        data_drift_dashboard = Dashboard(tabs=[DataDriftTab()])
-        data_drift_dashboard.calculate(reference_data=reference_df, current_data=current_df)
-        data_drift_dashboard.save(report_file_path)
-        with open(report_file_path, 'r', encoding='utf-8') as f:
-            html_content = f.read()
-        components.html(html_content, height=1000, scrolling=True)
-        st.success("Rapport Evidently généré et affiché avec succès.")
-        # os.remove(report_file_path) # Optionally remove the file after display
-    except Exception as e:
-        st.error(f"Erreur lors de la génération ou de l'affichage du rapport Evidently : {e}")
-        logger.exception("Erreur lors de l'exécution du rapport Evidently dans Streamlit:")
-
-def map_feature_names(processed_feature_names, name_mapping):
-    """
-    Remplace les noms de colonnes transformés par des noms lisibles en utilisant
-    un dictionnaire de mapping plus complet.
-    """
-    readable_names = []
-    for name in processed_feature_names:
-        # Nettoyer les préfixes du préprocesseur
-        base_name = name.split('__')[-1]
+        # Calculer les valeurs SHAP
+        with st.spinner("Calcul des valeurs SHAP..."):
+            shap_values = explainer.shap_values(client_data_processed_for_shap)
         
-        # 1. Chercher une correspondance exacte dans le dictionnaire complet
-        if base_name in name_mapping:
-            readable_name = name_mapping[base_name]
-        # 2. Chercher une correspondance pour les variables catégorielles (ex: NAME_CONTRACT_TYPE_Cash)
-        elif '_' in base_name:
-            parts = base_name.split('_')
-            original_name = '_'.join(parts[:-1]) # Variable d'origine (ex: NAME_CONTRACT_TYPE)
-            category = parts[-1] # Catégorie (ex: Cash)
-            if original_name in name_mapping:
-                readable_name = f"{name_mapping[original_name]} : {category}"
+        st.write("Les valeurs SHAP montrent l'impact de chaque caractéristique sur la prédiction du modèle.")
+        
+        # Affichage de l'explication individuelle
+        if prediction_proba is not None:
+            # SHAP pour les modèles binaires de classification donne souvent deux tableaux de valeurs (pour la classe 0 et la classe 1)
+            # Nous nous intéressons à la classe positive (par défaut, classe 1)
+            if isinstance(shap_values, list) and len(shap_values) > 1:
+                individual_shap_values = shap_values[1][0] # Pour la classe 1, et le premier échantillon
             else:
-                readable_name = base_name
-        # 3. Utiliser le nom brut s'il n'y a pas de correspondance
-        else:
-            readable_name = base_name
+                individual_shap_values = shap_values[0] # Si c'est un tableau unique (régression ou 1D classification)
             
-        readable_names.append(readable_name)
-    return readable_names
+            # Convertir en DataFrame pour l'affichage si nécessaire
+            client_processed_df = pd.DataFrame(client_data_processed_for_shap, columns=processed_feature_names)
 
-# Fonction utilitaire pour afficher les plots SHAP
-def st_shap(plot, height=None):
-    shap_html = f"<head>{shap.getjs()}</head><body>{plot.html()}</body>"
-    components.html(shap_html, height=height)
+            plot_individual_explanation(explainer, individual_shap_values, client_processed_df, processed_feature_names, selected_client_id)
+            
+            # Affichage de l'importance globale des features (si plusieurs clients sont prévus pour cela, sinon ce serait un plot sur les données d'entraînement)
+            # Pour l'instant, on peut réutiliser les shap values calculées pour le client unique, mais idéalement cela devrait venir d'un ensemble de données.
+            st.subheader("Importance Globale des Caractéristiques (Basée sur l'échantillon SHAP)")
+            plot_feature_importance(explainer, shap_values, processed_feature_names)
 
-def display_shap_plot(shap_explainer, input_df, all_training_features, preprocessor):
-    """Génère et affiche le force plot SHAP pour une seule prédiction."""
-    st.subheader("📊 Explication de la Prédiction (SHAP)")
-    st.info("""
-        Le graphique SHAP ci-dessous montre comment chaque caractéristique a contribué à la prédiction.
-        -   **Les valeurs rouges** poussent la prédiction vers un risque élevé.
-        -   **Les valeurs bleues** poussent la prédiction vers un risque faible.
-        -   **f(x)** est la probabilité prédite par le modèle.
-        -   **E[f(x)]** est la probabilité moyenne du modèle sur l'ensemble de l'entraînement.
-    """)
-    try:
-        if shap_explainer is None:
-            st.error("L'explainer SHAP n'a pas pu être chargé. Impossible d'afficher le graphique SHAP.")
-            return
-
-        # Assurez-vous que input_df contient toutes les colonnes attendues par le préprocesseur
-        # en utilisant les valeurs par défaut (0.0) pour les features non saisies
-        full_input_df = pd.DataFrame(columns=all_training_features)
-        full_input_df.loc[0] = 0 # Initialise avec des zéros
-        for col in input_df.columns:
-            if col in full_input_df.columns:
-                full_input_df[col] = input_df[col]
-
-        input_for_shap = preprocessor.transform(full_input_df[all_training_features])
-        shap_values_instance = shap_explainer(input_for_shap)
-        
-        # Ensure processed_feature_names is obtained correctly from the preprocessor
-        try:
-            if hasattr(preprocessor, 'get_feature_names_out') and callable(preprocessor.get_feature_names_out):
-                try:
-                    processed_feature_names = preprocessor.get_feature_names_out(input_features=all_training_features)
-                except TypeError:
-                    processed_feature_names = preprocessor.get_feature_names_out()
-            else:
-                processed_feature_names = [f"col_{i}" for i in range(input_for_shap.shape[1])]
-                logger.warning("Impossible d'obtenir les noms de features du préprocesseur pour SHAP. Noms génériques utilisés.")
-        except Exception as e:
-            logger.warning(f"Erreur lors de l'appel de get_feature_names_out pour SHAP: {e}. Noms génériques utilisés.")
-            processed_feature_names = [f"col_{i}" for i in range(input_for_shap.shape[1])]
-
-        readable_feature_names = map_feature_names(processed_feature_names, FULL_DESCRIPTIVE_NAMES)
-        
-        # Assurez-vous que les noms de features sont correctement mappés pour l'affichage SHAP
-        processed_features_series = pd.Series(shap_values_instance.data[0], index=readable_feature_names)
-        
-        fig = shap.force_plot(
-            base_value=shap_explainer.expected_value[0] if isinstance(shap_explainer.expected_value, np.ndarray) else shap_explainer.expected_value,
-            shap_values=shap_values_instance.values[0],
-            features=processed_features_series,
-            matplotlib=False
-        )
-        st_shap(fig, height=250)
     except Exception as e:
-        st.error(f"Erreur lors de la génération du graphique SHAP : {e}")
-        logger.exception("Erreur lors de l'exécution de SHAP dans Streamlit:")
+        st.error(f"Une erreur est survenue lors du calcul ou de l'affichage des valeurs SHAP : {e}")
+        logger.error(f"SHAP calculation/plotting error: {e}", exc_info=True)
+else:
+    st.warning("L'explainer SHAP n'a pas pu être initialisé. Les explications ne sont pas disponibles.")
 
-# --- 6. Chargement des Ressources au Démarrage ---
-# Ces fonctions vont maintenant télécharger les données/modèles depuis S3
-features_info, optimal_threshold, all_training_features = load_model_metadata_local()
-pipeline = load_mlflow_pipeline_local()
+st.write("---")
 
-# --- 7. Contenu Principal de la Page Streamlit ---
-st.title("📊 Prédiction de Défaut Client & Surveillance du Modèle")
-
-tab1, tab2 = st.tabs(["Prédiction de Prêt", "Analyse du Data Drift"])
-
-with tab1:
-    st.markdown("""
-    Cette application vous permet de simuler une prédiction de risque de défaut pour un client.
-    """)
-    # Vérifie que le modèle et les métadonnées sont chargés
-    if features_info is None or pipeline is None:
-        st.error("L'application n'a pas pu être initialisée car le modèle ou les métadonnées n'ont pas pu être chargés. Veuillez vérifier les logs pour plus de détails.")
-        st.stop() # Arrête l'exécution si les ressources critiques sont manquantes
-    else:
-        st.sidebar.header("Informations sur le Modèle")
-        st.sidebar.write(f"**Nom du Modèle :** `Pipeline de Régression Logistique`") # Nom générique
-        st.sidebar.write(f"**Source du Modèle :** `AWS S3 (Bucket: {S3_BUCKET_NAME})`") # Updated source
-        st.sidebar.write(f"**Seuil Optimal Utilisé :** `{optimal_threshold:.4f}`")
-        st.sidebar.write(f"**Nombre de Caractéristiques Importantes :** `{len(features_info)}`")
-
-        st.subheader("Saisie des Caractéristiques Client Importantes")
-        user_inputs = {}
-        num_columns = 2
-        cols = st.columns(num_columns)
-        
-        for i, (feature_original_name, info) in enumerate(features_info.items()):
-            display_name = info.get("display_name", feature_original_name)
-            min_val_hint = info.get("min_val")
-            max_val_hint = info.get("max_val")
-            default_value = (float(min_val_hint) + float(max_val_hint)) / 2 if min_val_hint is not None and max_val_hint is not None else 0.0
-            with cols[i % num_columns]:
-                st.write(f"**{display_name}**")
-                st.caption(f"Plage: [{min_val_hint:.2f} - {max_val_hint:.2f}]" if min_val_hint is not None and max_val_hint is not None else "Plage: N/A")
-                user_inputs[feature_original_name] = st.number_input(
-                    label=" ",
-                    value=float(default_value),
-                    min_value=float(min_val_hint) if min_val_hint is not None else None,
-                    max_value=float(max_val_hint) if max_val_hint is not None else None,
-                    format="%.4f",
-                    key=f"input_{feature_original_name}"
-                )
-        st.markdown("---")
-        if st.button("Obtenir la Prédiction", help="Cliquez pour exécuter le modèle avec les valeurs saisies."):
-            # Créer un DataFrame avec toutes les colonnes attendues par le modèle
-            # en utilisant les valeurs par défaut (0.0) pour les features non saisies
-            model_input_data = {
-                feature_name: user_inputs.get(feature_name, 0.0)
-                for feature_name in all_training_features
-            }
-            input_df = pd.DataFrame([model_input_data])
-            
-            try:
-                # Charger l'explainer SHAP et le préprocesseur
-                # Ces fonctions sont maintenant appelées ici, après avoir vérifié que pipeline est non-None
-                shap_explainer, preprocessor_for_shap = load_shap_explainer(pipeline, all_training_features)
-                
-                if shap_explainer is None or preprocessor_for_shap is None:
-                    st.error("Impossible d'initialiser l'explication SHAP. Veuillez vérifier les logs.")
-                else:
-                    prediction_proba = pipeline.predict_proba(input_df)[:, 1][0]
-                    prediction_class = 1 if prediction_proba >= optimal_threshold else 0
-                    st.subheader("🎉 Résultat de la Prédiction :")
-                    col_proba, col_class = st.columns(2)
-                    with col_proba:
-                        st.metric(label="Probabilité de Défaut", value=f"{prediction_proba:.4f}")
-                    with col_class:
-                        if prediction_class == 1:
-                            st.error("⚠️ **Client à Risque de Défaut Élevé**")
-                        else:
-                            st.success("✅ **Client à Risque de Défaut Faible**")
-                    
-                    display_shap_plot(shap_explainer, input_df, all_training_features, preprocessor_for_shap)
-                
-            except Exception as e:
-                st.error(f"Une erreur est survenue lors de l'exécution de la prédiction : {e}")
-                logger.exception("Erreur lors de la prédiction Streamlit:")
-
-with tab2:
-    st.header("Analyse du Data Drift (Evidently AI)")
-    st.markdown("""
-    Cette section génère et affiche un rapport de **Data Drift** directement dans l'application.
-    Le rapport compare les données d'entraînement (référence) aux données de production simulées.
-    """)
-    
-    if st.button("Générer et afficher le rapport de Data Drift"):
-        reference_data_for_drift = load_reference_data_for_drift()
-        
-        # Simulation de data drift
-        if reference_data_for_drift is not None:
-            df_production = reference_data_for_drift.copy()
-            if 'AMT_CREDIT' in df_production.columns:
-                df_production['AMT_CREDIT'] = df_production['AMT_CREDIT'] * np.random.normal(1.2, 0.1, len(df_production))
-            if 'app_feature_17' in df_production.columns: # Correspond à l'âge client
-                df_production['app_feature_17'] = df_production['app_feature_17'] + np.random.randint(-5, 5, len(df_production))
-            
-            generate_and_display_evidently_report(reference_data_for_drift, df_production)
-        else:
-            st.warning("Impossible de générer le rapport de Data Drift car les données de référence n'ont pas pu être chargées.")
-    else:
-        st.warning("Cliquez sur le bouton pour générer le rapport de dérive des données.")
+# --- Analyse de la Dérive des Données (Data Drift) ---
+st.subheader("Analyse de la Dérive des Données (Data Drift)")
+st.warning("Cette section est en cours de développement et nécessiterait une intégration avec des outils comme Evidently AI ou NannyML pour une analyse complète de la dérive des données.")
+st.info("Pour une implémentation complète, il faudrait charger un dataset de référence (entraînement) et le comparer avec les données de production (ou ici, les données de test).")
