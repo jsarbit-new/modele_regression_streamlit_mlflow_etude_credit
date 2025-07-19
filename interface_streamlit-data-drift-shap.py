@@ -639,19 +639,8 @@ def run_feature_engineering_streamlit(raw_df_app, _fitted_preprocessor, expected
         sk_id_curr = raw_df_app['SK_ID_CURR'].copy() # Utiliser .copy() pour éviter SettingWithCopyWarning
     
     # Définir une taille d'échantillon pour les données auxiliaires lors de la prédiction
-    # Pour la prédiction, il est préférable de ne pas échantillonner les données auxiliaires
-    # afin d'avoir les informations les plus complètes pour le client sélectionné.
-    # Cependant, si la mémoire est un problème persistant, on pourrait envisager un échantillonnage
-    # très léger ou une logique pour ne charger que les données pertinentes au client.
-    # Pour l'instant, on ne les échantillonne pas ici, car c'est pour un client unique.
-    # L'échantillonnage pour SHAP est géré dans `prepare_shap_reference_data`.
-    
-    # Nouvelle variable pour l'échantillonnage des données auxiliaires lors du FE
-    # pour les données de test.
-    # Nous pourrions utiliser une valeur plus petite que AUX_DATA_SAMPLE_ROWS (50000)
-    # si les problèmes de mémoire persistent, par exemple 10000 ou 20000.
-    # Pour l'instant, utilisons la même valeur que pour le préprocesseur.
-    TEST_AUX_DATA_SAMPLE_ROWS = 50000 
+    # Réduit la taille de l'échantillon pour les fichiers auxiliaires lors du FE des données de test
+    TEST_AUX_DATA_SAMPLE_ROWS = 10000 # Réduit à 10 000 lignes pour économiser la mémoire
 
     # 1. Exécution du Feature Engineering pour les données d'application
     df_fe = process_application_data_streamlit(raw_df_app.copy())
@@ -763,12 +752,11 @@ def run_feature_engineering_streamlit(raw_df_app, _fitted_preprocessor, expected
         if extra_in_transformed:
             logger.warning(f"Colonnes en trop après FE/prétraitement: {extra_in_transformed}. Seront ignorées.")
 
-        # Restaurer SK_ID_CURR si nécessaire (et si le modèle ne l'attend pas comme feature d'entrée)
+        # Restaurer SK_ID_CURR dans le DataFrame de sortie de cette fonction
+        # Il sera retiré juste avant la prédiction du modèle si nécessaire.
         if sk_id_curr is not None:
-            final_processed_df['SK_ID_CURR'] = sk_id_curr.values # Utiliser .values pour aligner l'index
-            # Si le modèle n'attend pas SK_ID_CURR en entrée, il faut le retirer avant la prédiction
-            if 'SK_ID_CURR' in final_processed_df.columns and 'SK_ID_CURR' not in expected_features:
-                final_processed_df = final_processed_df.drop(columns=['SK_ID_CURR'])
+            final_processed_df['SK_ID_CURR'] = sk_id_curr.values 
+            logger.info("SK_ID_CURR ajouté au DataFrame final traité.")
 
         logger.info(f"Fin de l'ingénierie des caractéristiques et prétraitement. Forme finale: {final_processed_df.shape}")
         del df_fe, df_features_to_transform, X_transformed_array, X_transformed_df # Libérer la mémoire
@@ -778,7 +766,11 @@ def run_feature_engineering_streamlit(raw_df_app, _fitted_preprocessor, expected
     except Exception as e:
         st.error(f"Erreur lors de l'application du préprocesseur: {e}. Vérifiez la cohérence des features.")
         logger.error(f"Error applying preprocessor: {e}", exc_info=True)
-        return pd.DataFrame({'SK_ID_CURR': sk_id_curr}) # Retourne un DF vide ou avec SK_ID_CURR seulement en cas d'erreur
+        # S'assurer que SK_ID_CURR est retourné même en cas d'erreur si disponible
+        error_df = pd.DataFrame()
+        if sk_id_curr is not None:
+            error_df['SK_ID_CURR'] = sk_id_curr.values
+        return error_df
 
 
 # --- Préparation des données d'entraînement (pour SHAP et Data Drift) ---
@@ -822,9 +814,13 @@ def prepare_shap_reference_data(_fitted_preprocessor, expected_features, num_row
         return None
 
     # Assurez-vous que SK_ID_CURR est retiré si présent et non attendu par le modèle
+    # Ceci est géré au niveau de la fonction run_feature_engineering_streamlit maintenant.
+    # Cependant, si transformed_data contient SK_ID_CURR et qu'il n'est pas dans expected_features
+    # (ce qui est le cas pour les features du modèle), on doit le retirer avant de passer à SHAP.
     if 'SK_ID_CURR' in transformed_data.columns and 'SK_ID_CURR' not in expected_features:
         transformed_data = transformed_data.drop(columns=['SK_ID_CURR'])
         logger.info("SK_ID_CURR retiré des données de référence SHAP car non attendu par le modèle.")
+
 
     # S'assurer que les colonnes du DataFrame de référence correspondent exactement aux expected_features
     # C'est déjà géré dans run_feature_engineering_streamlit, mais une dernière vérification ne fait pas de mal.
@@ -1036,7 +1032,6 @@ if fitted_preprocessor is None:
     st.stop()
     
 # Exécution du Feature Engineering sur les données de test réelles (avec les features attendues)
-# Correction: Renommer fitted_preprocessor en _fitted_preprocessor
 data_transformed = run_feature_engineering_streamlit(raw_test_data, fitted_preprocessor, all_training_features, is_training_data=False)
 if data_transformed is None or data_transformed.empty:
     st.error("Échec de l'ingénierie des caractéristiques pour les données de test ou le DataFrame résultant est vide.")
@@ -1044,11 +1039,11 @@ if data_transformed is None or data_transformed.empty:
 
 # Vérifier que les colonnes nécessaires sont présentes dans 'data_transformed'
 # et que l'ordre des colonnes correspond à celui attendu par le modèle MLflow.
+# Note: all_training_features ne doit pas contenir SK_ID_CURR
 missing_features_in_data = [f for f in all_training_features if f not in data_transformed.columns]
 if missing_features_in_data:
     st.warning(f"Attention : Les caractéristiques suivantes du modèle sont manquantes dans les données de test transformées : {', '.join(missing_features_in_data)}. Le modèle pourrait ne pas fonctionner comme prévu.")
     # Filtrer all_training_features pour ne garder que celles qui sont dans `data_transformed`
-    # Cela devrait déjà être géré par run_feature_engineering_streamlit, mais c'est une sécurité.
     all_training_features = [f for f in all_training_features if f in data_transformed.columns]
 
 # Si des colonnes sont manquantes après le filtrage, cela signifie que votre FE dans Streamlit
@@ -1074,10 +1069,12 @@ client_data_transformed_row = data_transformed[data_transformed['SK_ID_CURR'] ==
 
 # Préparer le DataFrame pour la prédiction
 # Assurez-vous que l'ordre des colonnes correspond à all_training_features
-client_data_for_prediction = client_data_transformed_row[all_training_features].to_frame().T
+# IMPORTANT : Retirer 'SK_ID_CURR' avant de passer au modèle si le modèle ne l'attend pas comme feature.
+features_for_model_prediction = [f for f in all_training_features if f != 'SK_ID_CURR']
+client_data_for_prediction = client_data_transformed_row[features_for_model_prediction].to_frame().T
 
 # Log pour le débogage :
-logger.info(f"Features passées au pipeline: {all_training_features}")
+logger.info(f"Features passées au pipeline: {features_for_model_prediction}")
 logger.info(f"Colonnes disponibles dans client_data_for_prediction: {client_data_for_prediction.columns.tolist()}")
 logger.info(f"Forme de client_data_for_prediction: {client_data_for_prediction.shape}")
 
@@ -1116,14 +1113,14 @@ st.write("---")
 st.subheader("Explication SHAP de la Prédiction")
 
 # Charger l'explainer SHAP et le préprocesseur (IdentityPreprocessor)
-# Correction: Renommer fitted_preprocessor en _fitted_preprocessor
 explainer, preprocessor = load_shap_explainer(pipeline, all_training_features, fitted_preprocessor)
 
 if explainer is not None and preprocessor is not None:
     try:
         # Les données pour SHAP sont les mêmes que celles pour la prédiction
-        shap_input_data = client_data_for_prediction # C'est déjà un DataFrame avec une ligne
-        processed_feature_names = all_training_features
+        # Utiliser features_for_model_prediction pour SHAP également, car SHAP attend les features du modèle
+        shap_input_data = client_data_transformed_row[features_for_model_prediction].to_frame().T
+        processed_feature_names = features_for_model_prediction # Les noms de features pour SHAP sont ceux du modèle
 
         with st.spinner("Calcul des valeurs SHAP..."):
             # shap_values peut être une liste de tableaux (classification) ou un tableau unique (régression)
