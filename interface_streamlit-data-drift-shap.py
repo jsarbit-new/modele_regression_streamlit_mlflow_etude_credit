@@ -530,5 +530,3 @@ st.write("---")
 st.subheader("Analyse de la Dérive des Données (Data Drift)")
 st.warning("Cette section est en cours de développement et nécessiterait une intégration avec des outils comme Evidently AI ou NannyML pour une analyse complète de la dérive des données.")
 st.info("Pour une implémentation complète, il faudrait charger un dataset de référence (entraînement) et le comparer avec les données de production (ou ici, les données de test).")
-"
-The logs indicate that the application is stuck in a loop, continuously trying to load the model. The last log message is "INFO:__main__:Streamlit: Pipeline chargé depuis './downloaded_assets/modele_mlflow'." and nothing else happens. The application is not displaying anything in the browser. What should I 
