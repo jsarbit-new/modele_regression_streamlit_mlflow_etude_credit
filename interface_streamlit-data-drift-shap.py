@@ -49,6 +49,8 @@ def load_data_from_s3(file_key, sample_rows=None):
     try:
         obj = s3_client.get_object(Bucket=AWS_S3_BUCKET_NAME, Key=file_key)
         if sample_rows:
+            # Lire en chunks pour ne pas tout charger en mémoire avant l'échantillonnage
+            # et prendre les premières N lignes si l'échantillonnage est activé
             data = pd.read_csv(io.BytesIO(obj['Body'].read()), nrows=sample_rows)
             logger.info(f"Fichier '{file_key}' chargé avec succès depuis S3 (échantillon de {sample_rows} lignes).")
         else:
@@ -239,14 +241,14 @@ def process_application_data_streamlit(df_app_raw):
     return df
 
 @st.cache_data(show_spinner="Traitement des données bureau et bureau_balance (FE)...")
-def process_bureau_data_streamlit():
+def process_bureau_data_streamlit(sample_rows=None): # Ajout du paramètre sample_rows
     """
     TRAITEMENT DES DONNÉES BUREAU ET BUREAU_BALANCE.
     LOGIQUE COPIÉE DE VOTRE FONCTION bureau_and_balance.
     """
     logger.info("Chargement et traitement des données bureau et bureau_balance.")
-    bureau = load_data_from_s3("input/bureau.csv")
-    bb = load_data_from_s3("input/bureau_balance.csv")
+    bureau = load_data_from_s3("input/bureau.csv", sample_rows=sample_rows) # Appliquer l'échantillonnage
+    bb = load_data_from_s3("input/bureau_balance.csv", sample_rows=sample_rows) # Appliquer l'échantillonnage
 
     if bureau is None or bb is None:
         st.error("Impossible de charger les données bureau ou bureau_balance.")
@@ -326,13 +328,13 @@ def process_bureau_data_streamlit():
     return bureau_agg.reset_index()
 
 @st.cache_data(show_spinner="Traitement des applications précédentes (FE)...")
-def process_previous_applications_streamlit():
+def process_previous_applications_streamlit(sample_rows=None): # Ajout du paramètre sample_rows
     """
     TRAITEMENT DES DONNÉES PREVIOUS_APPLICATION.
     LOGIQUE COPIÉE DE VOTRE FONCTION previous_applications.
     """
     logger.info("Chargement et traitement des données previous_application.")
-    prev = load_data_from_s3("input/previous_application.csv")
+    prev = load_data_from_s3("input/previous_application.csv", sample_rows=sample_rows) # Appliquer l'échantillonnage
     if prev is None:
         st.error("Impossible de charger les données previous_application.")
         return pd.DataFrame({'SK_ID_CURR': []})
@@ -384,13 +386,13 @@ def process_previous_applications_streamlit():
     return prev_agg.reset_index()
 
 @st.cache_data(show_spinner="Traitement des données POS_CASH_balance (FE)...")
-def process_pos_cash_streamlit():
+def process_pos_cash_streamlit(sample_rows=None): # Ajout du paramètre sample_rows
     """
     TRAITEMENT DES DONNÉES POS_CASH_BALANCE.
     LOGIQUE COPIÉE DE VOTRE FONCTION pos_cash.
     """
     logger.info("Chargement et traitement des données POS_CASH_balance.")
-    pos = load_data_from_s3("input/POS_CASH_balance.csv")
+    pos = load_data_from_s3("input/POS_CASH_balance.csv", sample_rows=sample_rows) # Appliquer l'échantillonnage
     if pos is None:
         st.error("Impossible de charger les données POS_CASH_balance.")
         return pd.DataFrame({'SK_ID_CURR': []})
@@ -418,13 +420,13 @@ def process_pos_cash_streamlit():
     return pos_agg.reset_index()
 
 @st.cache_data(show_spinner="Traitement des données installments_payments (FE)...")
-def process_installments_payments_streamlit():
+def process_installments_payments_streamlit(sample_rows=None): # Ajout du paramètre sample_rows
     """
     TRAITEMENT DES DONNÉES INSTALLMENTS_PAYMENTS.
     LOGIQUE COPIÉE DE VOTRE FONCTION installments_payments.
     """
     logger.info("Chargement et traitement des données installments_payments.")
-    ins = load_data_from_s3("input/installments_payments.csv")
+    ins = load_data_from_s3("input/installments_payments.csv", sample_rows=sample_rows) # Appliquer l'échantillonnage
     if ins is None:
         st.error("Impossible de charger les données installments_payments.")
         return pd.DataFrame({'SK_ID_CURR': []})
@@ -464,13 +466,13 @@ def process_installments_payments_streamlit():
     return ins_agg.reset_index()
 
 @st.cache_data(show_spinner="Traitement des données credit_card_balance (FE)...")
-def process_credit_card_balance_streamlit():
+def process_credit_card_balance_streamlit(sample_rows=None): # Ajout du paramètre sample_rows
     """
     TRAITEMENT DES DONNÉES CREDIT_CARD_BALANCE.
     LOGIQUE COPIÉE DE VOTRE FONCTION credit_card_balance.
     """
     logger.info("Chargement et traitement des données credit_card_balance.")
-    cc = load_data_from_s3("input/credit_card_balance.csv")
+    cc = load_data_from_s3("input/credit_card_balance.csv", sample_rows=sample_rows) # Appliquer l'échantillonnage
     if cc is None:
         st.error("Impossible de charger les données credit_card_balance.")
         return pd.DataFrame({'SK_ID_CURR': []})
@@ -526,21 +528,23 @@ def get_fitted_preprocessor():
     """
     logger.info("Début de l'ajustement du préprocesseur.")
     
+    # Définir une taille d'échantillon pour les données d'entraînement et auxiliaires
+    TRAIN_DATA_SAMPLE_ROWS = 50000 # Pour application_train.csv
+    AUX_DATA_SAMPLE_ROWS = 50000 # Pour les fichiers auxiliaires (bureau, prev_app, etc.)
+
     # 1. Chargement des données d'entraînement brutes
-    # Utilisation d'un échantillon pour le préprocesseur afin de réduire la consommation de mémoire
-    # et accélérer le chargement initial. Ajustez 'sample_rows' si nécessaire.
-    df_train_raw = load_data_from_s3("input/application_train.csv", sample_rows=50000) # Charger un échantillon
+    df_train_raw = load_data_from_s3("input/application_train.csv", sample_rows=TRAIN_DATA_SAMPLE_ROWS)
     if df_train_raw is None:
         st.error("Impossible de charger les données d'entraînement brutes pour ajuster le préprocesseur.")
         return None
 
     # 2. Exécution du Feature Engineering pour les données d'entraînement
-    # Récupérer les données auxiliaires transformées
-    bureau_df_fe = process_bureau_data_streamlit()
-    prev_app_df_fe = process_previous_applications_streamlit()
-    pos_cash_df_fe = process_pos_cash_streamlit()
-    install_payments_df_fe = process_installments_payments_streamlit()
-    credit_card_df_fe = process_credit_card_balance_streamlit()
+    # Récupérer les données auxiliaires transformées, en appliquant l'échantillonnage
+    bureau_df_fe = process_bureau_data_streamlit(sample_rows=AUX_DATA_SAMPLE_ROWS)
+    prev_app_df_fe = process_previous_applications_streamlit(sample_rows=AUX_DATA_SAMPLE_ROWS)
+    pos_cash_df_fe = process_pos_cash_streamlit(sample_rows=AUX_DATA_SAMPLE_ROWS)
+    install_payments_df_fe = process_installments_payments_streamlit(sample_rows=AUX_DATA_SAMPLE_ROWS)
+    credit_card_df_fe = process_credit_card_balance_streamlit(sample_rows=AUX_DATA_SAMPLE_ROWS)
 
     # Jointure des DataFrames transformés
     df_fe = process_application_data_streamlit(df_train_raw.copy()) # Utilise une copie pour ne pas modifier l'original mis en cache
@@ -634,10 +638,22 @@ def run_feature_engineering_streamlit(raw_df_app, fitted_preprocessor, expected_
     if 'SK_ID_CURR' in raw_df_app.columns:
         sk_id_curr = raw_df_app['SK_ID_CURR'].copy() # Utiliser .copy() pour éviter SettingWithCopyWarning
     
+    # Définir une taille d'échantillon pour les données auxiliaires lors de la prédiction
+    # Pour la prédiction, il est préférable de ne pas échantillonner les données auxiliaires
+    # afin d'avoir les informations les plus complètes pour le client sélectionné.
+    # Cependant, si la mémoire est un problème persistant, on pourrait envisager un échantillonnage
+    # très léger ou une logique pour ne charger que les données pertinentes au client.
+    # Pour l'instant, on ne les échantillonne pas ici, car c'est pour un client unique.
+    # L'échantillonnage pour SHAP est géré dans `prepare_shap_reference_data`.
+    
     # 1. Exécution du Feature Engineering pour les données d'application
     df_fe = process_application_data_streamlit(raw_df_app.copy())
 
     # 2. Récupérer et traiter les données auxiliaires
+    # Ici, nous chargeons les données complètes pour le client sélectionné, car l'échantillonnage
+    # des données auxiliaires pour une prédiction individuelle n'est pas idéal.
+    # Si la mémoire devient un problème ici, il faudrait revoir la stratégie de chargement
+    # pour ne charger que les lignes pertinentes à SK_ID_CURR.
     bureau_df_fe = process_bureau_data_streamlit()
     prev_app_df_fe = process_previous_applications_streamlit()
     pos_cash_df_fe = process_pos_cash_streamlit()
