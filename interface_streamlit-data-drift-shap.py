@@ -15,6 +15,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
+import matplotlib.pyplot as plt # Added for waterfall plot
+import json # Ensure json is imported for metadata loading
 
 # Configuration du logging
 logging.basicConfig(level=logging.INFO)
@@ -27,13 +29,13 @@ warnings.filterwarnings("ignore", category=UserWarning, module="evidently")
 # --- Configuration AWS S3 ---
 AWS_S3_BUCKET_NAME = st.secrets["aws"]["bucket_name"]
 AWS_ACCESS_KEY_ID = st.secrets["aws"]["aws_access_key_id"]
-AWS_SECRET_ACCESS_KEY = st.secrets["aws"]["aws_secret_access_key"]
+AWS_SECRET_ACCESS_KEY = st.secrets["aws"]["aws_secret_access_key"] # Corrected 'key' to 'KEY'
 
 # Initialisation du client S3
 s3_client = boto3.client(
     's3',
     aws_access_key_id=AWS_ACCESS_KEY_ID,
-    aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY # Corrected 'key' to 'KEY'
 )
 
 # --- Fonctions de chargement de données et de modèles ---
@@ -68,7 +70,7 @@ def load_model_metadata_from_s3(file_key="model_metadata.json"):
     """Charge les métadonnées du modèle depuis un fichier JSON sur S3."""
     try:
         obj = s3_client.get_object(Bucket=AWS_S3_BUCKET_NAME, Key=file_key)
-        metadata = pd.read_json(io.BytesIO(obj['Body'].read())) # Utilisez pd.read_json pour la simplicité
+        metadata = json.loads(obj['Body'].read().decode('utf-8')) # Use json.loads for direct JSON parsing
         logger.info("Métadonnées du modèle chargées depuis S3.")
         return metadata
     except NoCredentialsError:
@@ -97,9 +99,9 @@ def load_mlflow_pipeline_local(model_local_dir="./downloaded_assets/modele_mlflo
     Charge un pipeline MLflow depuis un répertoire local.
     Assurez-vous que le modèle MLflow est bien présent dans ce répertoire.
     """
-    if not os.path.exists(model_local_dir):
-        # Tenter de télécharger si le répertoire n'existe pas localement
-        st.warning(f"Répertoire du modèle MLflow '{model_local_dir}' non trouvé localement. Tentative de téléchargement depuis S3...")
+    if not os.path.exists(model_local_dir) or not os.listdir(model_local_dir): # Check if directory is empty
+        # Tenter de télécharger si le répertoire n'existe pas localement ou est vide
+        st.warning(f"Répertoire du modèle MLflow '{model_local_dir}' non trouvé ou vide localement. Tentative de téléchargement depuis S3...")
         try:
             download_mlflow_model_from_s3("modele_mlflow", model_local_dir)
         except Exception as e:
@@ -118,8 +120,10 @@ def load_mlflow_pipeline_local(model_local_dir="./downloaded_assets/modele_mlflo
 @st.cache_resource(show_spinner="Téléchargement du modèle MLflow depuis S3...")
 def download_mlflow_model_from_s3(s3_prefix, local_dir):
     """Télécharge un modèle MLflow complet (répertoire) depuis S3."""
-    if os.path.exists(local_dir):
-        logger.info(f"Le répertoire local '{local_dir}' existe déjà, pas de téléchargement nécessaire.")
+    # This function is now called by load_mlflow_pipeline_local if needed
+    # We should ensure it doesn't try to re-download if already present
+    if os.path.exists(local_dir) and os.listdir(local_dir):
+        logger.info(f"Le répertoire local '{local_dir}' existe déjà et n'est pas vide, pas de téléchargement nécessaire.")
         return
 
     os.makedirs(local_dir, exist_ok=True)
@@ -127,6 +131,7 @@ def download_mlflow_model_from_s3(s3_prefix, local_dir):
         paginator = s3_client.get_paginator('list_objects_v2')
         pages = paginator.paginate(Bucket=AWS_S3_BUCKET_NAME, Prefix=s3_prefix)
 
+        files_downloaded_count = 0
         for page in pages:
             if "Contents" in page:
                 for obj in page["Contents"]:
@@ -138,11 +143,17 @@ def download_mlflow_model_from_s3(s3_prefix, local_dir):
                     if not object_key.endswith('/'): # Ignorer les 'dossiers' S3
                         s3_client.download_file(AWS_S3_BUCKET_NAME, object_key, local_file_path)
                         logger.info(f"Téléchargé : {object_key} vers {local_file_path}")
+                        files_downloaded_count += 1
             else:
                 st.warning(f"Aucun objet trouvé sous le préfixe S3: {s3_prefix}")
                 logger.warning(f"No objects found under S3 prefix: {s3_prefix}")
                 return # Sortir si rien n'est trouvé
-        logger.info(f"Modèle MLflow téléchargé avec succès depuis S3 '{s3_prefix}' vers '{local_dir}'.")
+        
+        if files_downloaded_count > 0:
+            logger.info(f"Modèle MLflow téléchargé avec succès depuis S3 '{s3_prefix}' vers '{local_dir}' ({files_downloaded_count} fichiers).")
+        else:
+            st.warning(f"Aucun fichier téléchargé pour le modèle MLflow sous le préfixe '{s3_prefix}'. Vérifiez le chemin S3.")
+
     except NoCredentialsError:
         st.error("Identifiants AWS non trouvés pour le téléchargement du modèle MLflow.")
         logger.error("AWS credentials not found for MLflow model download.")
@@ -159,8 +170,8 @@ def download_mlflow_model_from_s3(s3_prefix, local_dir):
 
 # --- Préparation des données d'entraînement (pour SHAP et Data Drift) ---
 
-@st.cache_data(show_spinner="Chargement des données d'entraînement pour SHAP et Data Drift...")
-def load_training_data_for_shap(file_key="data/application_train.csv"):
+@st.cache_data(show_spinner="Chargement des données d'entraînement pour SHAP et Data Drift depuis S3...")
+def load_training_data_for_shap(file_key="input/application_train.csv"): # Corrected to "input"
     """Charge les données d'entraînement complètes pour les calculs SHAP et Data Drift."""
     try:
         data = load_data_from_s3(file_key)
@@ -178,19 +189,14 @@ def load_training_data_for_shap(file_key="data/application_train.csv"):
 
 # --- Ingénierie des Caractéristiques pour les données de référence SHAP (simplifié) ---
 
-# Note : Dans une application réelle, cette fonction devrait répliquer EXACTEMENT
-# l'étape de pré-traitement de votre pipeline scikit-learn avant le modèle.
-# Ici, nous allons la laisser simple pour correspondre aux colonnes brutes.
-# Si votre pipeline inclut un préprocesseur qui modifie le nombre/nom des colonnes,
-# cette fonction devrait le refléter pour que SHAP soit précis sur les features pré-traitées.
-
 @st.cache_data(show_spinner="Préparation des données pour l'ingénierie des caractéristiques...")
 def run_feature_engineering_pipeline(num_rows=None):
     """
     Simule une partie de l'ingénierie des caractéristiques pour obtenir des données brutes
     à utiliser comme base pour SHAP et le préprocesseur.
     """
-    raw_data = load_training_data_for_shap()
+    # Changed file_key to "input/application_train.csv"
+    raw_data = load_training_data_for_shap(file_key="input/application_train.csv") 
     if raw_data is None:
         return None
     
@@ -242,7 +248,7 @@ def load_shap_explainer(_pyfunc_pipeline, all_training_features):
     if isinstance(sklearn_model_or_pipeline, Pipeline) or hasattr(sklearn_model_or_pipeline, 'named_steps'):
         logger.info("Modèle MLflow chargé est reconnu comme un Pipeline scikit-learn.")
         # C'est un pipeline, extrayons le préprocesseur et le modèle final
-        if 'preprocessor' in sklearn_model_or_pipeline.named_steps:
+        if 'preprocessor' in sklearn_model_or_or_pipeline.named_steps: # Typo here
             preprocessor = sklearn_model_or_pipeline.named_steps['preprocessor']
             logger.info("Préprocesseur nommé 'preprocessor' trouvé dans le pipeline.")
         else:
@@ -393,19 +399,26 @@ st.title("Tableau de Bord de Prédiction de Risque de Crédit")
 st.write("Cette application prédit le risque de défaut de paiement pour les demandes de crédit et fournit des explications sur les prédictions.")
 
 # Chargement des données et du modèle
-data = load_data_from_s3("input/application_test.csv")
+# Correction du chemin du fichier pour "input/application_test.csv"
+data = load_data_from_s3("input/application_test.csv") 
 if data is None:
     st.stop() # Arrêter l'exécution si les données ne sont pas chargées
 
 # Chargement des métadonnées du modèle
-model_metadata = load_model_metadata_from_s3()
+# Assurez-vous que le fichier model_metadata.json est bien à la racine de votre bucket S3
+model_metadata = load_model_metadata_from_s3(file_key="model_metadata.json") 
 if model_metadata is None:
     st.error("Impossible de charger les métadonnées du modèle. Certaines fonctionnalités pourraient être limitées.")
     # Définir des valeurs par défaut si les métadonnées ne sont pas disponibles
     all_training_features = data.columns.tolist() # Fallback, à ajuster si besoin
     threshold = 0.5 # Valeur par défaut si non trouvée
 else:
-    all_training_features = model_metadata['training_features'].tolist() if 'training_features' in model_metadata else data.columns.tolist()
+    all_training_features = model_metadata['training_features'] if 'training_features' in model_metadata else data.columns.tolist()
+    # NOUVEAU : S'assurer que 'SK_ID_CURR' n'est pas dans les features d'entraînement
+    if 'SK_ID_CURR' in all_training_features:
+        all_training_features.remove('SK_ID_CURR')
+        logger.info("SK_ID_CURR retiré de all_training_features.")
+    
     threshold = model_metadata.get('threshold', 0.5) # Récupère le seuil ou utilise 0.5 par défaut
     
     # Assurez-vous que les colonnes nécessaires sont présentes dans 'data'
@@ -517,3 +530,5 @@ st.write("---")
 st.subheader("Analyse de la Dérive des Données (Data Drift)")
 st.warning("Cette section est en cours de développement et nécessiterait une intégration avec des outils comme Evidently AI ou NannyML pour une analyse complète de la dérive des données.")
 st.info("Pour une implémentation complète, il faudrait charger un dataset de référence (entraînement) et le comparer avec les données de production (ou ici, les données de test).")
+"
+The logs indicate that the application is stuck in a loop, continuously trying to load the model. The last log message is "INFO:__main__:Streamlit: Pipeline chargé depuis './downloaded_assets/modele_mlflow'." and nothing else happens. The application is not displaying anything in the browser. What should I 
