@@ -111,13 +111,21 @@ def load_mlflow_pipeline_local(model_local_dir="./downloaded_assets/modele_mlflo
             try:
                 with open(input_example_path, 'r') as f:
                     input_example_data = json.load(f)
-                # Assuming input_example.json contains a dict or list of dicts
-                if isinstance(input_example_data, dict):
+                
+                # NOUVELLE LOGIQUE : Gérer le cas où input_example.json a la structure {'columns': [...], 'data': [[...]]}
+                if isinstance(input_example_data, dict) and 'columns' in input_example_data and 'data' in input_example_data:
+                    input_features_from_example = input_example_data['columns']
+                    logger.info(f"Features d'entrée récupérées de input_example.json (structure 'columns'/'data'): {input_features_from_example}")
+                elif isinstance(input_example_data, dict):
                     input_features_from_example = list(input_example_data.keys())
+                    logger.info(f"Features d'entrée récupérées de input_example.json (structure dictionnaire simple): {input_features_from_example}")
                 elif isinstance(input_example_data, list) and input_example_data:
                     # If it's a list of examples, take keys from the first one
                     input_features_from_example = list(input_example_data[0].keys())
-                logger.info(f"Features d'entrée récupérées de input_example.json: {input_features_from_example}")
+                    logger.info(f"Features d'entrée récupérées de input_example.json (structure liste de dictionnaires): {input_features_from_example}")
+                else:
+                    logger.warning("Structure inattendue pour input_example.json.")
+
             except Exception as e:
                 logger.warning(f"Erreur lors de la lecture ou du parsing de input_example.json: {e}")
         else:
