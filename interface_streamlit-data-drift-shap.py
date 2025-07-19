@@ -36,7 +36,7 @@ AWS_SECRET_ACCESS_KEY = st.secrets["aws"]["aws_secret_access_key"]
 s3_client = boto3.client(
     's3',
     aws_access_key_id=AWS_ACCESS_KEY_ID,
-    aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+    aws_access_key_secret=AWS_SECRET_ACCESS_KEY
 )
 
 # --- Fonctions de chargement de données depuis S3 ---
@@ -618,14 +618,14 @@ def get_fitted_preprocessor():
 
 # --- NOUVELLE FONCTION : Ingénierie des Caractéristiques dans Streamlit ---
 @st.cache_data(show_spinner="Exécution de l'ingénierie des caractéristiques...")
-def run_feature_engineering_streamlit(raw_df_app, fitted_preprocessor, expected_features, is_training_data=False):
+def run_feature_engineering_streamlit(raw_df_app, _fitted_preprocessor, expected_features, is_training_data=False):
     """
     Effectue l'ingénierie des caractéristiques sur les données brutes fournies.
     Cette fonction utilise le préprocesseur ajusté sur les données d'entraînement.
 
     Args:
         raw_df_app (pd.DataFrame): Le DataFrame de données brutes (application_train/test.csv).
-        fitted_preprocessor (ColumnTransformer): Le préprocesseur ajusté sur les données d'entraînement.
+        _fitted_preprocessor (ColumnTransformer): Le préprocesseur ajusté sur les données d'entraînement.
         expected_features (list): Liste des noms de features attendus par le modèle MLflow.
         is_training_data (bool): Indique si les données sont des données d'entraînement (pour SHAP).
     Returns:
@@ -704,7 +704,7 @@ def run_feature_engineering_streamlit(raw_df_app, fitted_preprocessor, expected_
     
     # Récupérer les noms des colonnes après le `fit` du preprocessor
     # Le `get_feature_names_out()` du ColumnTransformer retourne les noms avec le préfixe du transformer ('num__')
-    preprocessor_fitted_features_full_names = fitted_preprocessor.get_feature_names_out()
+    preprocessor_fitted_features_full_names = _fitted_preprocessor.get_feature_names_out()
     # Nettoyer ces noms pour correspondre aux noms de colonnes d'origine avant le préfixe
     preprocessor_expected_features_clean = [name.replace('num__', '') for name in preprocessor_fitted_features_full_names]
 
@@ -722,14 +722,14 @@ def run_feature_engineering_streamlit(raw_df_app, fitted_preprocessor, expected_
             logger.warning(f"La colonne '{col}' attendue par le préprocesseur n'est pas présente dans le DataFrame transformé. Remplie avec des NaNs.")
 
     # 6. Application du préprocesseur ajusté
-    if fitted_preprocessor is None:
+    if _fitted_preprocessor is None:
         st.error("Le préprocesseur n'a pas pu être ajusté. Impossible de prétraiter les données.")
         logger.error("Fitted preprocessor is None during feature engineering.")
         return pd.DataFrame({'SK_ID_CURR': sk_id_curr}) # Retourne un DF vide ou avec SK_ID_CURR seulement en cas d'erreur
     
     try:
         # Appliquer le préprocesseur ajusté
-        X_transformed_array = fitted_preprocessor.transform(df_features_to_transform)
+        X_transformed_array = _fitted_preprocessor.transform(df_features_to_transform)
         
         # Le ColumnTransformer retourne un numpy array. Convertir en DataFrame avec les bons noms de colonnes.
         X_transformed_df = pd.DataFrame(X_transformed_array, columns=preprocessor_expected_features_clean, index=df_features_to_transform.index)
@@ -799,7 +799,7 @@ def load_training_data_for_shap(file_key="input/application_train.csv", sample_r
 
 # --- Préparation des données de référence pour SHAP (maintenant via FE Streamlit) ---
 @st.cache_data(show_spinner="Préparation des données de référence pour SHAP...")
-def prepare_shap_reference_data(fitted_preprocessor, expected_features, num_rows=1000):
+def prepare_shap_reference_data(_fitted_preprocessor, expected_features, num_rows=1000):
     """
     Charge les données d'entraînement brutes, applique le FE, et retourne un échantillon
     pour les calculs SHAP.
@@ -811,7 +811,7 @@ def prepare_shap_reference_data(fitted_preprocessor, expected_features, num_rows
     # Appliquez le FE ici pour obtenir les données transformées pour SHAP
     # IMPORTANT : Pour les données de référence SHAP, on ne veut pas que SK_ID_CURR soit traité comme une feature.
     # On s'assure que run_feature_engineering_streamlit le gère correctement.
-    transformed_data = run_feature_engineering_streamlit(raw_data, fitted_preprocessor, expected_features, is_training_data=True)
+    transformed_data = run_feature_engineering_streamlit(raw_data, _fitted_preprocessor, expected_features, is_training_data=True)
 
     if transformed_data is None:
         return None
@@ -843,7 +843,7 @@ class IdentityPreprocessor:
 
 
 @st.cache_resource(show_spinner="Calcul de l'explainer SHAP...")
-def load_shap_explainer(_pyfunc_pipeline, all_training_features, fitted_preprocessor):
+def load_shap_explainer(_pyfunc_pipeline, all_training_features, _fitted_preprocessor):
     """
     Charge l'explainer SHAP. Le préprocesseur est un IdentityPreprocessor car le FE est fait en amont.
     """
@@ -851,7 +851,7 @@ def load_shap_explainer(_pyfunc_pipeline, all_training_features, fitted_preproce
 
     # Utilise les données transformées pour la référence SHAP
     # Le num_rows ici contrôle la taille de l'échantillon pour SHAP, ce qui est crucial pour la performance.
-    ref_data_transformed = prepare_shap_reference_data(fitted_preprocessor, all_training_features, num_rows=1000)
+    ref_data_transformed = prepare_shap_reference_data(_fitted_preprocessor, all_training_features, num_rows=1000)
     if ref_data_transformed is None or ref_data_transformed.empty:
         st.error("Impossible de charger ou de préparer les données de référence transformées pour l'explainer SHAP. Le DataFrame est vide.")
         logger.error("SHAP reference data is None or empty.")
@@ -1031,6 +1031,7 @@ if fitted_preprocessor is None:
     st.stop()
     
 # Exécution du Feature Engineering sur les données de test réelles (avec les features attendues)
+# Correction: Renommer fitted_preprocessor en _fitted_preprocessor
 data_transformed = run_feature_engineering_streamlit(raw_test_data, fitted_preprocessor, all_training_features, is_training_data=False)
 if data_transformed is None or data_transformed.empty:
     st.error("Échec de l'ingénierie des caractéristiques pour les données de test ou le DataFrame résultant est vide.")
@@ -1110,6 +1111,7 @@ st.write("---")
 st.subheader("Explication SHAP de la Prédiction")
 
 # Charger l'explainer SHAP et le préprocesseur (IdentityPreprocessor)
+# Correction: Renommer fitted_preprocessor en _fitted_preprocessor
 explainer, preprocessor = load_shap_explainer(pipeline, all_training_features, fitted_preprocessor)
 
 if explainer is not None and preprocessor is not None:
