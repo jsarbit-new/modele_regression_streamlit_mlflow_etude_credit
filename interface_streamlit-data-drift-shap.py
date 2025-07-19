@@ -10,6 +10,8 @@ import shap
 from evidently.dashboard import Dashboard
 from evidently.tabs import DataDriftTab
 from sklearn.model_selection import train_test_split
+import boto3 # NEW: Import boto3 for AWS S3 interaction
+from botocore.exceptions import NoCredentialsError # NEW: Import for handling AWS credentials errors
 
 # --- 1. Page Configuration Streamlit ---
 st.set_page_config(
@@ -22,11 +24,122 @@ st.set_page_config(
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- 3. MLflow Model Path Configuration ---
-# IMPORTANT: Ce chemin doit pointer vers le dossier 'modele_mlflow'
-# que vous avez copié de votre dossier mlruns/X/run_id/artifacts/model
-# et placé à la racine de votre dépôt GitHub.
-LOCAL_MODEL_PATH = "modele_mlflow"
+# --- 3. AWS S3 Configuration ---
+# REMPLACEZ par le nom EXACT de votre bucket S3
+S3_BUCKET_NAME = "modele-regression-streamlit-mlflow-etude-credit"
+# REMPLACEZ par la région de votre bucket S3 (ex: "eu-west-3" pour Paris)
+AWS_REGION = "eu-west-3" # Assurez-vous que c'est la bonne région de votre bucket S3
+
+# Chemin local temporaire où les fichiers seront téléchargés dans l'environnement Streamlit Cloud
+LOCAL_DOWNLOAD_DIR = "./downloaded_assets"
+os.makedirs(LOCAL_DOWNLOAD_DIR, exist_ok=True) # Crée le dossier local si nécessaire
+
+# --- S3 Keys for specific files/directories ---
+# REMPLACEZ par le chemin réel de votre dataset sur S3
+DATASET_S3_KEY = "input/application_train.csv"
+# REMPLACEZ par le préfixe du dossier de votre modèle MLflow sur S3 (doit se terminer par '/')
+# Ex: si votre modèle MLflow est dans s3://your-bucket/modele_mlflow/
+# alors MODEL_S3_KEY_PREFIX = "modele_mlflow/"
+MODEL_S3_KEY_PREFIX = "modele_mlflow/"
+
+# --- NEW: Function to download a single file from S3 (cached) ---
+@st.cache_resource
+def download_file_from_s3(s3_key, local_path):
+    """
+    Télécharge un fichier unique depuis S3 vers un chemin local.
+    Les identifiants AWS sont récupérés des secrets Streamlit Cloud.
+    """
+    try:
+        aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+        aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+
+        if not aws_access_key_id or not aws_secret_access_key:
+            st.error("Erreur : Les identifiants AWS (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY) ne sont pas configurés dans les secrets Streamlit.")
+            return None
+
+        s3 = boto3.client(
+            's3',
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key,
+            region_name=AWS_REGION
+        )
+
+        st.info(f"Téléchargement de '{s3_key}' depuis S3 (bucket: '{S3_BUCKET_NAME}')...")
+        s3.download_file(S3_BUCKET_NAME, s3_key, local_path)
+        st.success(f"Fichier '{s3_key}' téléchargé avec succès vers '{local_path}'!")
+        return local_path
+    except NoCredentialsError:
+        st.error("Erreur d'authentification AWS. Vérifiez vos identifiants AWS dans les secrets Streamlit Cloud.")
+        return None
+    except Exception as e:
+        st.error(f"Erreur lors du téléchargement de '{s3_key}' depuis S3 : {e}")
+        logger.exception(f"Erreur lors du téléchargement de '{s3_key}' depuis S3:")
+        return None
+
+# --- NEW: Function to download an entire directory (prefix) from S3 (cached) ---
+@st.cache_resource
+def download_s3_directory(s3_prefix, local_dir):
+    """
+    Télécharge tous les objets sous un préfixe S3 donné vers un répertoire local.
+    Utile pour les dossiers de modèles MLflow.
+    """
+    try:
+        aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID")
+        aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+
+        if not aws_access_key_id or not aws_secret_access_key:
+            st.error("Erreur : Les identifiants AWS ne sont pas configurés pour le téléchargement de dossier.")
+            return False
+
+        s3 = boto3.client(
+            's3',
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key,
+            region_name=AWS_REGION
+        )
+
+        paginator = s3.get_paginator('list_objects_v2')
+        pages = paginator.paginate(Bucket=S3_BUCKET_NAME, Prefix=s3_prefix)
+
+        os.makedirs(local_dir, exist_ok=True)
+
+        st.info(f"Téléchargement du dossier '{s3_prefix}' depuis S3 (bucket: '{S3_BUCKET_NAME}')...")
+        files_downloaded = 0
+        for page in pages:
+            if "Contents" in page:
+                for obj in page["Contents"]:
+                    s3_key = obj["Key"]
+                    # Skip directories themselves if they appear as objects
+                    if s3_key.endswith('/'):
+                        continue
+                    
+                    # Construct local path, preserving subdirectories
+                    relative_path = os.path.relpath(s3_key, s3_prefix)
+                    local_path = os.path.join(local_dir, relative_path)
+                    
+                    # Ensure local directory exists for the file
+                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                    
+                    # Only download if the file doesn't exist or is different (optional, for robustness)
+                    # For simplicity, we re-download every time for @st.cache_resource
+                    s3.download_file(S3_BUCKET_NAME, s3_key, local_path)
+                    files_downloaded += 1
+        
+        if files_downloaded > 0:
+            st.success(f"Dossier '{s3_prefix}' téléchargé avec succès vers '{local_dir}' ({files_downloaded} fichiers)!")
+            return True
+        else:
+            st.warning(f"Aucun fichier trouvé sous le préfixe '{s3_prefix}' dans le bucket '{S3_BUCKET_NAME}'.")
+            return False
+
+    except NoCredentialsError:
+        st.error("Erreur d'authentification AWS. Vérifiez vos identifiants AWS dans les secrets Streamlit Cloud.")
+        return False
+    except Exception as e:
+        st.error(f"Erreur lors du téléchargement du dossier '{s3_prefix}' depuis S3 : {e}")
+        logger.exception(f"Erreur lors du téléchargement du dossier '{s3_prefix}' depuis S3:")
+        return False
+
 
 # --- 4. Feature Engineering Functions (Stubs) ---
 # Dictionnaire des variables importantes à afficher dans l'interface
@@ -138,22 +251,31 @@ FULL_DESCRIPTIVE_NAMES = {
 @st.cache_data(show_spinner="Chargement des données...")
 def load_application_data_stub(num_rows=None):
     """
-    Charge et retourne les données.
+    Charge et retourne les données depuis S3.
     Cette fonction ne s'exécutera qu'une seule fois.
     Args:
         num_rows (int, optional): Nombre de lignes à lire. Si None, lit 100 lignes.
     """
     try:
-        # Load only a subset of rows to save memory on Streamlit Cloud
+        # Définir le chemin local pour le dataset téléchargé
+        dataset_local_path = os.path.join(LOCAL_DOWNLOAD_DIR, os.path.basename(DATASET_S3_KEY))
+        
+        # Télécharger le dataset depuis S3
+        downloaded_path = download_file_from_s3(DATASET_S3_KEY, dataset_local_path)
+        
+        if downloaded_path is None:
+            st.error("Impossible de télécharger le fichier de données depuis S3.")
+            return None
+
+        # Load data from the downloaded local path
         if num_rows is None:
-            # For initial app setup, load minimal rows (e.g., for column names)
-            df = pd.read_csv('input/application_train.csv', nrows=100)
+            df = pd.read_csv(downloaded_path, nrows=100)
         else:
-            # For specific calls like drift analysis, load specified num_rows
-            df = pd.read_csv('input/application_train.csv', nrows=num_rows)
+            df = pd.read_csv(downloaded_path, nrows=num_rows)
         return df
-    except FileNotFoundError:
-        st.error("Fichier de données non trouvé. Assurez-vous que le fichier est bien à sa place dans le dossier 'input'.")
+    except Exception as e:
+        st.error(f"Erreur lors du chargement des données depuis '{DATASET_S3_KEY}' : {e}")
+        logger.exception("Erreur lors du chargement des données d'application:")
         return None
 
 @st.cache_data(show_spinner="Traitement des données Bureau...")
@@ -237,15 +359,25 @@ def load_model_metadata_local():
 @st.cache_resource(show_spinner="Chargement du pipeline du modèle...")
 def load_mlflow_pipeline_local():
     """
-    Charge le pipeline MLflow depuis le chemin local spécifié.
+    Charge le pipeline MLflow en le téléchargeant depuis S3.
     """
+    # Define the local path where the MLflow model directory will be downloaded
+    model_local_dir = os.path.join(LOCAL_DOWNLOAD_DIR, os.path.basename(MODEL_S3_KEY_PREFIX.strip('/')))
+
+    # Download the entire MLflow model directory from S3
+    if not download_s3_directory(MODEL_S3_KEY_PREFIX, model_local_dir):
+        st.error("Impossible de télécharger le dossier du modèle MLflow depuis S3.")
+        return None
+
     try:
-        pipeline = mlflow.pyfunc.load_model(model_uri=LOCAL_MODEL_PATH)
-        logger.info(f"Streamlit: Pipeline chargé depuis '{LOCAL_MODEL_PATH}'.")
+        # Now load the model from the local downloaded directory
+        pipeline = mlflow.pyfunc.load_model(model_uri=model_local_dir)
+        logger.info(f"Streamlit: Pipeline chargé depuis '{model_local_dir}'.")
         return pipeline
     except Exception as e:
-        st.error(f"Échec lors du chargement du pipeline local: {e}")
-        st.info(f"Assurez-vous que le dossier '{LOCAL_MODEL_PATH}' existe et contient un modèle MLflow valide.")
+        st.error(f"Échec lors du chargement du pipeline MLflow localement après téléchargement S3: {e}")
+        st.info(f"Assurez-vous que le dossier '{model_local_dir}' existe et contient un modèle MLflow valide.")
+        logger.exception("Erreur lors du chargement du pipeline MLflow:")
         return None
 
 @st.cache_resource(show_spinner="Calcul de l'explainer SHAP...")
@@ -280,11 +412,7 @@ def load_shap_explainer(_pyfunc_pipeline, all_training_features):
             def get_feature_names_out(self, input_features=None):
                 if input_features is not None and isinstance(input_features, list):
                     return input_features
-                # Fallback si input_features n'est pas fourni ou n'est pas une liste
-                # Cette partie est délicate, car X n'est pas disponible ici.
-                # Il est plus sûr de supposer que le préprocesseur est manquant ou mal nommé.
-                # Pour un cas réel, il faudrait s'assurer que le préprocesseur est bien nommé ou exposé.
-                return [f"col_{i}" for i in range(X.shape[1])] if 'X' in locals() else [] # Fallback, peut ne pas être précis
+                return [] # Fallback, can't infer from X here
         preprocessor = IdentityPreprocessor()
     
     final_model = sklearn_pipeline.steps[-1][1] # La dernière étape du pipeline sklearn est le modèle final
@@ -323,7 +451,7 @@ def load_reference_data_for_drift():
         # RÉDUIT LE NOMBRE DE LIGNES POUR ÉCONOMISER LA MÉMOIRE SUR STREAMLIT CLOUD
         reference_df = run_feature_engineering_pipeline(num_rows=5000) # Réduit de 30000 à 5000
         if reference_df is None:
-            st.error("Impossible de charger les données de référence pour le drift.")
+            st.error("Impossible de générer le rapport Evidently : données de référence manquantes.")
             return None
         logger.info(f"Données de référence chargées avec succès. Nombre d'échantillons: {len(reference_df)}")
         return reference_df
@@ -340,7 +468,7 @@ def generate_and_display_evidently_report(reference_df, current_df):
             return
 
         st.info("Génération du rapport en cours. Cela peut prendre quelques instants...")
-        report_file_path = "evidently_data_drift_report_temp.html"
+        report_file_path = os.path.join(LOCAL_DOWNLOAD_DIR, "evidently_data_drift_report_temp.html")
         data_drift_dashboard = Dashboard(tabs=[DataDriftTab()])
         data_drift_dashboard.calculate(reference_data=reference_df, current_data=current_df)
         data_drift_dashboard.save(report_file_path)
@@ -348,7 +476,7 @@ def generate_and_display_evidently_report(reference_df, current_df):
             html_content = f.read()
         components.html(html_content, height=1000, scrolling=True)
         st.success("Rapport Evidently généré et affiché avec succès.")
-        os.remove(report_file_path)
+        # os.remove(report_file_path) # Optionally remove the file after display
     except Exception as e:
         st.error(f"Erreur lors de la génération ou de l'affichage du rapport Evidently : {e}")
         logger.exception("Erreur lors de l'exécution du rapport Evidently dans Streamlit:")
@@ -444,6 +572,7 @@ def display_shap_plot(shap_explainer, input_df, all_training_features, preproces
         logger.exception("Erreur lors de l'exécution de SHAP dans Streamlit:")
 
 # --- 6. Chargement des Ressources au Démarrage ---
+# Ces fonctions vont maintenant télécharger les données/modèles depuis S3
 features_info, optimal_threshold, all_training_features = load_model_metadata_local()
 pipeline = load_mlflow_pipeline_local()
 
@@ -463,7 +592,7 @@ with tab1:
     else:
         st.sidebar.header("Informations sur le Modèle")
         st.sidebar.write(f"**Nom du Modèle :** `Pipeline de Régression Logistique`") # Nom générique
-        st.sidebar.write(f"**Source du Modèle :** `Local (Dossier '{LOCAL_MODEL_PATH}')`")
+        st.sidebar.write(f"**Source du Modèle :** `AWS S3 (Bucket: {S3_BUCKET_NAME})`") # Updated source
         st.sidebar.write(f"**Seuil Optimal Utilisé :** `{optimal_threshold:.4f}`")
         st.sidebar.write(f"**Nombre de Caractéristiques Importantes :** `{len(features_info)}`")
 
