@@ -393,7 +393,7 @@ st.title("Tableau de Bord de Prédiction de Risque de Crédit")
 st.write("Cette application prédit le risque de défaut de paiement pour les demandes de crédit et fournit des explications sur les prédictions.")
 
 # Chargement des données et du modèle
-data = load_data_from_s3("data/application_test.csv")
+data = load_data_from_s3("input/application_test.csv")
 if data is None:
     st.stop() # Arrêter l'exécution si les données ne sont pas chargées
 
