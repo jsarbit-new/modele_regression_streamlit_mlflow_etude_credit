@@ -13,7 +13,7 @@ import io
 import os
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import MinMaxScaler, OneHotEncoder # OneHotEncoder si votre FE l'utilise
+from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
 import matplotlib.pyplot as plt
 import json
@@ -42,12 +42,18 @@ s3_client = boto3.client(
 # --- Fonctions de chargement de données depuis S3 ---
 
 @st.cache_data(show_spinner="Chargement des données depuis S3...")
-def load_data_from_s3(file_key):
-    """Charge un fichier CSV depuis un bucket S3."""
+def load_data_from_s3(file_key, sample_rows=None):
+    """Charge un fichier CSV depuis un bucket S3.
+    Permet de charger un échantillon de lignes pour le débogage ou la réduction de mémoire.
+    """
     try:
         obj = s3_client.get_object(Bucket=AWS_S3_BUCKET_NAME, Key=file_key)
-        data = pd.read_csv(io.BytesIO(obj['Body'].read()))
-        logger.info(f"Fichier '{file_key}' chargé avec succès depuis S3.")
+        if sample_rows:
+            data = pd.read_csv(io.BytesIO(obj['Body'].read()), nrows=sample_rows)
+            logger.info(f"Fichier '{file_key}' chargé avec succès depuis S3 (échantillon de {sample_rows} lignes).")
+        else:
+            data = pd.read_csv(io.BytesIO(obj['Body'].read()))
+            logger.info(f"Fichier '{file_key}' chargé avec succès depuis S3.")
         return data
     except NoCredentialsError:
         st.error("Identifiants AWS non trouvés. Veuillez configurer les secrets Streamlit.")
@@ -521,7 +527,9 @@ def get_fitted_preprocessor():
     logger.info("Début de l'ajustement du préprocesseur.")
     
     # 1. Chargement des données d'entraînement brutes
-    df_train_raw = load_data_from_s3("input/application_train.csv")
+    # Utilisation d'un échantillon pour le préprocesseur afin de réduire la consommation de mémoire
+    # et accélérer le chargement initial. Ajustez 'sample_rows' si nécessaire.
+    df_train_raw = load_data_from_s3("input/application_train.csv", sample_rows=50000) # Charger un échantillon
     if df_train_raw is None:
         st.error("Impossible de charger les données d'entraînement brutes pour ajuster le préprocesseur.")
         return None
@@ -537,14 +545,33 @@ def get_fitted_preprocessor():
     # Jointure des DataFrames transformés
     df_fe = process_application_data_streamlit(df_train_raw.copy()) # Utilise une copie pour ne pas modifier l'original mis en cache
     
-    # Jointures comme dans votre script MLflow
-    df_fe = df_fe.set_index('SK_ID_CURR').join(bureau_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_bureau').reset_index()
-    df_fe = df_fe.set_index('SK_ID_CURR').join(prev_app_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_prev').reset_index()
-    df_fe = df_fe.set_index('SK_ID_CURR').join(pos_cash_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_pos').reset_index()
-    df_fe = df_fe.set_index('SK_ID_CURR').join(install_payments_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_ins').reset_index()
-    df_fe = df_fe.set_index('SK_ID_CURR').join(credit_card_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_cc').reset_index()
+    # Jointures comme dans votre script MLflow, avec vérification des DataFrames vides
+    if not bureau_df_fe.empty:
+        df_fe = df_fe.set_index('SK_ID_CURR').join(bureau_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_bureau').reset_index()
+    else:
+        logger.warning("bureau_df_fe est vide lors de l'ajustement du préprocesseur, jointure ignorée.")
     
-    del bureau_df_fe, prev_app_df_fe, pos_cash_df_fe, install_payments_df_fe, credit_card_df_fe
+    if not prev_app_df_fe.empty:
+        df_fe = df_fe.set_index('SK_ID_CURR').join(prev_app_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_prev').reset_index()
+    else:
+        logger.warning("prev_app_df_fe est vide lors de l'ajustement du préprocesseur, jointure ignorée.")
+
+    if not pos_cash_df_fe.empty:
+        df_fe = df_fe.set_index('SK_ID_CURR').join(pos_cash_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_pos').reset_index()
+    else:
+        logger.warning("pos_cash_df_fe est vide lors de l'ajustement du préprocesseur, jointure ignorée.")
+
+    if not install_payments_df_fe.empty:
+        df_fe = df_fe.set_index('SK_ID_CURR').join(install_payments_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_ins').reset_index()
+    else:
+        logger.warning("install_payments_df_fe est vide lors de l'ajustement du préprocesseur, jointure ignorée.")
+
+    if not credit_card_df_fe.empty:
+        df_fe = df_fe.set_index('SK_ID_CURR').join(credit_card_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_cc').reset_index()
+    else:
+        logger.warning("credit_card_df_fe est vide lors de l'ajustement du préprocesseur, jointure ignorée.")
+    
+    del bureau_df_fe, prev_app_df_fe, pos_cash_df_fe, install_payments_df_fe, credit_card_df_fe, df_train_raw
     gc.collect()
 
     # Nettoyage des noms de colonnes (remplacement des caractères spéciaux pour compatibilité SHAP, etc.)
@@ -561,6 +588,7 @@ def get_fitted_preprocessor():
     features_for_preprocessor = [f for f in df_fe.columns if f not in exclude_features_for_preprocessor]
     
     df_features_for_preprocessor = df_fe[features_for_preprocessor].copy()
+    del df_fe # Libérer la mémoire du DataFrame complet
 
     # Définition du pipeline de prétraitement pour les caractéristiques numériques
     numeric_features = df_features_for_preprocessor.columns.tolist() # Toutes les colonnes restantes sont numériques
@@ -580,6 +608,8 @@ def get_fitted_preprocessor():
     # Ajuste le préprocesseur sur les données d'entraînement
     preprocessor.fit(df_features_for_preprocessor)
     logger.info("Préprocesseur ajusté avec succès sur les données d'entraînement.")
+    del df_features_for_preprocessor # Libérer la mémoire
+    gc.collect()
     return preprocessor
 
 # --- NOUVELLE FONCTION : Ingénierie des Caractéristiques dans Streamlit ---
@@ -602,7 +632,7 @@ def run_feature_engineering_streamlit(raw_df_app, fitted_preprocessor, expected_
     # Assurez-vous que SK_ID_CURR est conservé pour la jointure ou l'identification
     sk_id_curr = None
     if 'SK_ID_CURR' in raw_df_app.columns:
-        sk_id_curr = raw_df_app['SK_ID_CURR']
+        sk_id_curr = raw_df_app['SK_ID_CURR'].copy() # Utiliser .copy() pour éviter SettingWithCopyWarning
     
     # 1. Exécution du Feature Engineering pour les données d'application
     df_fe = process_application_data_streamlit(raw_df_app.copy())
@@ -615,11 +645,31 @@ def run_feature_engineering_streamlit(raw_df_app, fitted_preprocessor, expected_
     credit_card_df_fe = process_credit_card_balance_streamlit()
 
     # 3. Jointure des DataFrames transformés (comme dans votre script MLflow)
-    df_fe = df_fe.set_index('SK_ID_CURR').join(bureau_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_bureau').reset_index()
-    df_fe = df_fe.set_index('SK_ID_CURR').join(prev_app_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_prev').reset_index()
-    df_fe = df_fe.set_index('SK_ID_CURR').join(pos_cash_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_pos').reset_index()
-    df_fe = df_fe.set_index('SK_ID_CURR').join(install_payments_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_ins').reset_index()
-    df_fe = df_fe.set_index('SK_ID_CURR').join(credit_card_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_cc').reset_index()
+    # Ajout de vérifications .empty pour éviter les erreurs de jointure si un chargement a échoué
+    if not bureau_df_fe.empty:
+        df_fe = df_fe.set_index('SK_ID_CURR').join(bureau_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_bureau').reset_index()
+    else:
+        logger.warning("bureau_df_fe est vide, jointure ignorée.")
+    
+    if not prev_app_df_fe.empty:
+        df_fe = df_fe.set_index('SK_ID_CURR').join(prev_app_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_prev').reset_index()
+    else:
+        logger.warning("prev_app_df_fe est vide, jointure ignorée.")
+
+    if not pos_cash_df_fe.empty:
+        df_fe = df_fe.set_index('SK_ID_CURR').join(pos_cash_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_pos').reset_index()
+    else:
+        logger.warning("pos_cash_df_fe est vide, jointure ignorée.")
+
+    if not install_payments_df_fe.empty:
+        df_fe = df_fe.set_index('SK_ID_CURR').join(install_payments_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_ins').reset_index()
+    else:
+        logger.warning("install_payments_df_fe est vide, jointure ignorée.")
+
+    if not credit_card_df_fe.empty:
+        df_fe = df_fe.set_index('SK_ID_CURR').join(credit_card_df_fe.set_index('SK_ID_CURR'), how='left', rsuffix='_cc').reset_index()
+    else:
+        logger.warning("credit_card_df_fe est vide, jointure ignorée.")
 
     del bureau_df_fe, prev_app_df_fe, pos_cash_df_fe, install_payments_df_fe, credit_card_df_fe
     gc.collect()
@@ -636,51 +686,94 @@ def run_feature_engineering_streamlit(raw_df_app, fitted_preprocessor, expected_
     exclude_features_for_preprocessor = ['TARGET', 'SK_ID_CURR', 'index']
     features_for_preprocessor = [f for f in df_fe.columns if f not in exclude_features_for_preprocessor]
     
+    # Récupérer les noms des colonnes après le `fit` du preprocessor
+    # Le `get_feature_names_out()` du ColumnTransformer retourne les noms avec le préfixe du transformer ('num__')
+    preprocessor_fitted_features_full_names = fitted_preprocessor.get_feature_names_out()
+    # Nettoyer ces noms pour correspondre aux noms de colonnes d'origine avant le préfixe
+    preprocessor_expected_features_clean = [name.replace('num__', '') for name in preprocessor_fitted_features_full_names]
+
     # Créer un DataFrame avec uniquement les colonnes attendues par le préprocesseur, dans le bon ordre
-    preprocessor_fitted_features = fitted_preprocessor.get_feature_names_out()
-    preprocessor_fitted_features_cleaned = [name.replace('num__', '') for name in preprocessor_fitted_features]
-
-
-    df_features_to_transform = pd.DataFrame(columns=preprocessor_fitted_features_cleaned, index=df_fe.index)
+    # Cela garantit que le DataFrame passé au .transform() a la bonne structure
+    df_features_to_transform = pd.DataFrame(columns=preprocessor_expected_features_clean, index=df_fe.index)
     
-    for col in preprocessor_fitted_features_cleaned:
+    for col in preprocessor_expected_features_clean:
         if col in df_fe.columns:
             df_features_to_transform[col] = df_fe[col]
         else:
-            df_features_to_transform[col] = np.nan # Remplir avec NaN si la colonne est manquante
+            # Si une colonne attendue par le préprocesseur n'est pas dans df_fe (par exemple, suite à un one-hot encoding sur des valeurs non vues)
+            # il faut la rajouter avec des NaNs pour que le ColumnTransformer puisse la gérer.
+            df_features_to_transform[col] = np.nan 
+            logger.warning(f"La colonne '{col}' attendue par le préprocesseur n'est pas présente dans le DataFrame transformé. Remplie avec des NaNs.")
 
     # 6. Application du préprocesseur ajusté
     if fitted_preprocessor is None:
-        st.error("Le préprocesseur n'a pas pu être ajusté. Impossible de transformer les données.")
-        return None
-
-    # Appliquer la transformation. Le résultat est un tableau NumPy.
-    transformed_array = fitted_preprocessor.transform(df_features_to_transform)
+        st.error("Le préprocesseur n'a pas pu être ajusté. Impossible de prétraiter les données.")
+        logger.error("Fitted preprocessor is None during feature engineering.")
+        return pd.DataFrame({'SK_ID_CURR': sk_id_curr}) # Retourne un DF vide ou avec SK_ID_CURR seulement en cas d'erreur
     
-    # Convertir le tableau NumPy en DataFrame Pandas
-    # Les noms de colonnes du DataFrame final doivent correspondre à `expected_features`
-    # qui viennent de `input_example.json` du modèle MLflow.
-    df_transformed_final = pd.DataFrame(transformed_array, columns=expected_features, index=raw_df_app.index)
+    try:
+        # Appliquer le préprocesseur ajusté
+        X_transformed_array = fitted_preprocessor.transform(df_features_to_transform)
+        
+        # Le ColumnTransformer retourne un numpy array. Convertir en DataFrame avec les bons noms de colonnes.
+        X_transformed_df = pd.DataFrame(X_transformed_array, columns=preprocessor_expected_features_clean, index=df_features_to_transform.index)
+        
+        # S'assurer que le DataFrame final a exactement les mêmes colonnes que celles attendues par le modèle MLflow
+        # Cela est crucial car le modèle a été entraîné avec un ensemble spécifique de features
+        # Gérer les colonnes manquantes (remplir avec 0 ou NaN si le modèle attend une valeur par défaut)
+        # Gérer les colonnes en trop (les supprimer)
+        
+        final_processed_df = pd.DataFrame(index=X_transformed_df.index)
+        missing_in_transformed = []
+        extra_in_transformed = []
 
-    # Ré-ajouter SK_ID_CURR si vous l'avez retiré et qu'il est nécessaire pour l'output
-    if sk_id_curr is not None and 'SK_ID_CURR' not in df_transformed_final.columns:
-        df_transformed_final['SK_ID_CURR'] = sk_id_curr
+        for feature in expected_features:
+            if feature in X_transformed_df.columns:
+                final_processed_df[feature] = X_transformed_df[feature]
+            else:
+                final_processed_df[feature] = 0.0 # Ou np.nan, selon ce qui est le mieux pour votre modèle
+                missing_in_transformed.append(feature)
 
-    logger.info(f"Ingénierie des caractéristiques terminée dans Streamlit. Forme transformée finale: {df_transformed_final.shape}")
-    return df_transformed_final
+        for feature in X_transformed_df.columns:
+            if feature not in expected_features:
+                extra_in_transformed.append(feature)
+
+        if missing_in_transformed:
+            logger.warning(f"Colonnes attendues par le modèle mais manquantes après FE/prétraitement: {missing_in_transformed}. Remplies avec 0.")
+        if extra_in_transformed:
+            logger.warning(f"Colonnes en trop après FE/prétraitement: {extra_in_transformed}. Seront ignorées.")
+
+        # Restaurer SK_ID_CURR si nécessaire (et si le modèle ne l'attend pas comme feature d'entrée)
+        if sk_id_curr is not None:
+            final_processed_df['SK_ID_CURR'] = sk_id_curr.values # Utiliser .values pour aligner l'index
+            # Si le modèle n'attend pas SK_ID_CURR en entrée, il faut le retirer avant la prédiction
+            if 'SK_ID_CURR' in final_processed_df.columns and 'SK_ID_CURR' not in expected_features:
+                final_processed_df = final_processed_df.drop(columns=['SK_ID_CURR'])
+
+        logger.info(f"Fin de l'ingénierie des caractéristiques et prétraitement. Forme finale: {final_processed_df.shape}")
+        del df_fe, df_features_to_transform, X_transformed_array, X_transformed_df # Libérer la mémoire
+        gc.collect()
+        return final_processed_df
+
+    except Exception as e:
+        st.error(f"Erreur lors de l'application du préprocesseur: {e}. Vérifiez la cohérence des features.")
+        logger.error(f"Error applying preprocessor: {e}", exc_info=True)
+        return pd.DataFrame({'SK_ID_CURR': sk_id_curr}) # Retourne un DF vide ou avec SK_ID_CURR seulement en cas d'erreur
 
 
 # --- Préparation des données d'entraînement (pour SHAP et Data Drift) ---
 
 @st.cache_data(show_spinner="Chargement des données d'entraînement brutes pour SHAP et Data Drift depuis S3...")
-def load_training_data_for_shap(file_key="input/application_train.csv"):
-    """Charge les données d'entraînement brutes pour les calculs SHAP et Data Drift."""
+def load_training_data_for_shap(file_key="input/application_train.csv", sample_rows=10000):
+    """Charge les données d'entraînement brutes pour les calculs SHAP et Data Drift.
+    Charge un échantillon pour réduire la consommation de mémoire.
+    """
     try:
-        data = load_data_from_s3(file_key)
+        data = load_data_from_s3(file_key, sample_rows=sample_rows)
         if data is not None:
             if 'TARGET' in data.columns:
                 data = data.drop(columns=['TARGET'], errors='ignore')
-            logger.info("Données d'entraînement brutes pour SHAP et Data Drift chargées.")
+            logger.info(f"Données d'entraînement brutes pour SHAP et Data Drift chargées ({sample_rows} lignes).")
             return data
         return None
     except Exception as e:
@@ -690,24 +783,35 @@ def load_training_data_for_shap(file_key="input/application_train.csv"):
 
 # --- Préparation des données de référence pour SHAP (maintenant via FE Streamlit) ---
 @st.cache_data(show_spinner="Préparation des données de référence pour SHAP...")
-def prepare_shap_reference_data(fitted_preprocessor, expected_features, num_rows=None):
+def prepare_shap_reference_data(fitted_preprocessor, expected_features, num_rows=1000):
     """
     Charge les données d'entraînement brutes, applique le FE, et retourne un échantillon
     pour les calculs SHAP.
     """
-    raw_data = load_training_data_for_shap(file_key="input/application_train.csv")
+    raw_data = load_training_data_for_shap(file_key="input/application_train.csv", sample_rows=num_rows) # Charger un échantillon
     if raw_data is None:
         return None
     
     # Appliquez le FE ici pour obtenir les données transformées pour SHAP
+    # IMPORTANT : Pour les données de référence SHAP, on ne veut pas que SK_ID_CURR soit traité comme une feature.
+    # On s'assure que run_feature_engineering_streamlit le gère correctement.
     transformed_data = run_feature_engineering_streamlit(raw_data, fitted_preprocessor, expected_features, is_training_data=True)
 
     if transformed_data is None:
         return None
 
-    if num_rows:
-        return transformed_data.sample(min(num_rows, len(transformed_data)), random_state=42)
-    return transformed_data
+    # Assurez-vous que SK_ID_CURR est retiré si présent et non attendu par le modèle
+    if 'SK_ID_CURR' in transformed_data.columns and 'SK_ID_CURR' not in expected_features:
+        transformed_data = transformed_data.drop(columns=['SK_ID_CURR'])
+        logger.info("SK_ID_CURR retiré des données de référence SHAP car non attendu par le modèle.")
+
+    # S'assurer que les colonnes du DataFrame de référence correspondent exactement aux expected_features
+    # C'est déjà géré dans run_feature_engineering_streamlit, mais une dernière vérification ne fait pas de mal.
+    final_shap_ref_data = transformed_data[expected_features].copy()
+    
+    logger.info(f"Données de référence SHAP préparées. Forme: {final_shap_ref_data.shape}")
+    return final_shap_ref_data
+
 
 # --- Explication SHAP ---
 
@@ -730,36 +834,34 @@ def load_shap_explainer(_pyfunc_pipeline, all_training_features, fitted_preproce
     preprocessor = IdentityPreprocessor()
 
     # Utilise les données transformées pour la référence SHAP
+    # Le num_rows ici contrôle la taille de l'échantillon pour SHAP, ce qui est crucial pour la performance.
     ref_data_transformed = prepare_shap_reference_data(fitted_preprocessor, all_training_features, num_rows=1000)
-    if ref_data_transformed is None:
-        st.error("Impossible de charger les données de référence transformées pour l'explainer SHAP.")
+    if ref_data_transformed is None or ref_data_transformed.empty:
+        st.error("Impossible de charger ou de préparer les données de référence transformées pour l'explainer SHAP. Le DataFrame est vide.")
+        logger.error("SHAP reference data is None or empty.")
         return None, None
 
-    # S'assurer que seules les colonnes d'entraînement sont utilisées
-    ref_data_transformed_filtered = ref_data_transformed[all_training_features]
-    
     # Les données sont déjà transformées, le IdentityPreprocessor ne fait rien
-    ref_data_processed_for_shap = preprocessor.transform(ref_data_transformed_filtered)
+    # Assurez-vous que ref_data_transformed a les mêmes colonnes et ordre que all_training_features
+    ref_data_processed_for_shap = ref_data_transformed[all_training_features]
     
     # Les noms des features sont déjà les bons car ils proviennent du FE de Streamlit
-    processed_feature_names = all_training_features 
-
-    ref_data_df = pd.DataFrame(ref_data_processed_for_shap, columns=processed_feature_names)
+    processed_feature_names = all_training_features    
     
-    # Vérifier si le DataFrame de référence pour SHAP est vide
-    if ref_data_df.empty:
-        st.error("Le DataFrame de référence pour SHAP est vide. Impossible d'initialiser l'explainer SHAP.")
-        logger.error("SHAP reference DataFrame is empty.")
-        return None, None
-
     # Passer la fonction predict_proba du pipeline MLflow à SHAP.Explainer
     if not hasattr(_pyfunc_pipeline, 'predict_proba'):
         st.error("Le pipeline MLflow ne semble pas avoir une méthode 'predict_proba'. SHAP pourrait ne pas fonctionner.")
         logger.error("MLflow pipeline does not have 'predict_proba' method.")
         return None, None
-        
-    explainer = shap.Explainer(_pyfunc_pipeline.predict_proba, ref_data_df)
-    return explainer, preprocessor
+            
+    try:
+        explainer = shap.Explainer(_pyfunc_pipeline.predict_proba, ref_data_processed_for_shap)
+        logger.info("Explainer SHAP chargé avec succès.")
+        return explainer, preprocessor
+    except Exception as e:
+        st.error(f"Erreur lors de l'initialisation de l'explainer SHAP : {e}. Vérifiez la compatibilité du modèle et des données de référence.")
+        logger.error(f"Error initializing SHAP explainer: {e}", exc_info=True)
+        return None, None
 
 
 # --- Fonctions d'affichage ---
@@ -774,7 +876,7 @@ def plot_feature_importance(explainer, shap_values, feature_names, top_n=10):
     if isinstance(shap_values, list):
         # Assumer classe 1 pour classification binaire
         if len(shap_values) > 1:
-            shap_values_abs_mean = np.abs(np.array(shap_values[1])).mean(0) 
+            shap_values_abs_mean = np.abs(np.array(shap_values[1])).mean(0)    
         else: # Si une seule classe est retournée (ex: régression)
             shap_values_abs_mean = np.abs(np.array(shap_values[0])).mean(0)
     else:
@@ -815,9 +917,15 @@ def plot_individual_explanation(explainer, shap_values_individual, processed_fea
         # Expected value pour la classe 1 (positive)
         expected_value = explainer.expected_value[1] if isinstance(explainer.expected_value, np.ndarray) and len(explainer.expected_value) > 1 else explainer.expected_value
         
+        # S'assurer que processed_features_df est un DataFrame avec une seule ligne
         if not isinstance(processed_features_df, pd.DataFrame):
             processed_features_df = pd.DataFrame([processed_features_df], columns=feature_names)
-            
+        elif processed_features_df.shape[0] > 1:
+            processed_features_df = processed_features_df.iloc[0:1] # Prendre la première ligne si plusieurs
+        
+        # S'assurer que les colonnes du DataFrame correspondent aux feature_names
+        processed_features_df = processed_features_df[feature_names]
+
         shap.initjs()
         
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -849,13 +957,16 @@ st.title("Tableau de Bord de Prédiction de Risque de Crédit")
 st.write("Cette application prédit le risque de défaut de paiement pour les demandes de crédit et fournit des explications sur les prédictions.")
 
 # Chargement des données de test brutes (application_test.csv)
-raw_test_data = load_data_from_s3("input/application_test.csv")
-if raw_test_data is None:
+# Charger un petit échantillon pour le test initial et pour éviter les problèmes de mémoire sur Streamlit Cloud
+raw_test_data = load_data_from_s3("input/application_test.csv", sample_rows=1000) 
+if raw_test_data is None or raw_test_data.empty:
+    st.error("Impossible de charger les données de test brutes ou le DataFrame est vide. L'application ne peut pas démarrer.")
     st.stop()
 
 # Chargement du pipeline MLflow et de ses métadonnées et features d'entrée
 pipeline, model_metadata, all_training_features = load_mlflow_pipeline_local()
 if pipeline is None:
+    st.error("Impossible de charger le pipeline MLflow. L'application ne peut pas démarrer.")
     st.stop()
 
 # Vérifier si all_training_features a été récupéré du modèle
@@ -905,8 +1016,8 @@ if fitted_preprocessor is None:
     
 # Exécution du Feature Engineering sur les données de test réelles (avec les features attendues)
 data_transformed = run_feature_engineering_streamlit(raw_test_data, fitted_preprocessor, all_training_features, is_training_data=False)
-if data_transformed is None:
-    st.error("Échec de l'ingénierie des caractéristiques pour les données de test.")
+if data_transformed is None or data_transformed.empty:
+    st.error("Échec de l'ingénierie des caractéristiques pour les données de test ou le DataFrame résultant est vide.")
     st.stop()
 
 # Vérifier que les colonnes nécessaires sont présentes dans 'data_transformed'
@@ -915,6 +1026,7 @@ missing_features_in_data = [f for f in all_training_features if f not in data_tr
 if missing_features_in_data:
     st.warning(f"Attention : Les caractéristiques suivantes du modèle sont manquantes dans les données de test transformées : {', '.join(missing_features_in_data)}. Le modèle pourrait ne pas fonctionner comme prévu.")
     # Filtrer all_training_features pour ne garder que celles qui sont dans `data_transformed`
+    # Cela devrait déjà être géré par run_feature_engineering_streamlit, mais c'est une sécurité.
     all_training_features = [f for f in all_training_features if f in data_transformed.columns]
 
 # Si des colonnes sont manquantes après le filtrage, cela signifie que votre FE dans Streamlit
@@ -931,11 +1043,12 @@ if 'SK_ID_CURR' not in data_transformed.columns:
     st.error("La colonne 'SK_ID_CURR' est manquante dans les données transformées. Impossible de sélectionner un client.")
     st.stop()
 
-client_ids = data_transformed['SK_ID_CURR'].tolist() 
+client_ids = data_transformed['SK_ID_CURR'].tolist()    
 selected_client_id = st.sidebar.selectbox("Sélectionnez un ID Client :", client_ids)
 
 # Trouver les données du client sélectionné dans le DataFrame transformé
-client_data_transformed_row = data_transformed[data_transformed['SK_ID_CURR'] == selected_client_id].iloc[0]
+# Utiliser .copy() pour éviter SettingWithCopyWarning
+client_data_transformed_row = data_transformed[data_transformed['SK_ID_CURR'] == selected_client_id].iloc[0].copy()
 
 # Préparer le DataFrame pour la prédiction
 # Assurez-vous que l'ordre des colonnes correspond à all_training_features
@@ -950,19 +1063,25 @@ logger.info(f"Forme de client_data_for_prediction: {client_data_for_prediction.s
 # --- Prédiction ---
 with st.spinner("Calcul de la prédiction..."):
     try:
-        prediction_proba = pipeline.predict(client_data_for_prediction)[0]
-        prediction = (prediction_proba >= threshold).astype(int)
-        
-        st.subheader("Résultat de la Prédiction")
-        col_pred, col_proba = st.columns(2)
-        with col_pred:
-            if prediction == 1:
-                st.error(f"**Prédiction : Risque Élevé de Défaut (Crédit Refusé)**")
-            else:
-                st.success(f"**Prédiction : Faible Risque de Défaut (Crédit Accordé)**")
-        with col_proba:
-            st.info(f"Probabilité de défaut : **{prediction_proba:.2f}**")
-            st.info(f"Seuil de décision : **{threshold:.2f}**")
+        # Assurez-vous que client_data_for_prediction est un DataFrame et non une Series
+        if client_data_for_prediction.empty:
+            st.error("Les données du client pour la prédiction sont vides. Impossible de prédire.")
+            prediction_proba = None
+            prediction = None
+        else:
+            prediction_proba = pipeline.predict(client_data_for_prediction)[0]
+            prediction = (prediction_proba >= threshold).astype(int)
+            
+            st.subheader("Résultat de la Prédiction")
+            col_pred, col_proba = st.columns(2)
+            with col_pred:
+                if prediction == 1:
+                    st.error(f"**Prédiction : Risque Élevé de Défaut (Crédit Refusé)**")
+                else:
+                    st.success(f"**Prédiction : Faible Risque de Défaut (Crédit Accordé)**")
+            with col_proba:
+                st.info(f"Probabilité de défaut : **{prediction_proba:.2f}**")
+                st.info(f"Seuil de décision : **{threshold:.2f}**")
     except Exception as e:
         st.error(f"Erreur lors de la prédiction pour le client : {e}")
         logger.error(f"Prediction error for client {selected_client_id}: {e}", exc_info=True)
@@ -980,10 +1099,11 @@ explainer, preprocessor = load_shap_explainer(pipeline, all_training_features, f
 if explainer is not None and preprocessor is not None:
     try:
         # Les données pour SHAP sont les mêmes que celles pour la prédiction
-        shap_input_data = client_data_for_prediction
+        shap_input_data = client_data_for_prediction # C'est déjà un DataFrame avec une ligne
         processed_feature_names = all_training_features
 
         with st.spinner("Calcul des valeurs SHAP..."):
+            # shap_values peut être une liste de tableaux (classification) ou un tableau unique (régression)
             shap_values = explainer.shap_values(shap_input_data)
         
         st.write("Les valeurs SHAP montrent l'impact de chaque caractéristique sur la prédiction du modèle.")
@@ -994,7 +1114,8 @@ if explainer is not None and preprocessor is not None:
             else:
                 individual_shap_values = shap_values[0] # Si c'est un tableau unique (régression ou 1D classification)
             
-            client_processed_df = pd.DataFrame(shap_input_data, columns=processed_feature_names)
+            # Assurez-vous que client_processed_df a les bonnes colonnes et est un DataFrame
+            client_processed_df = shap_input_data[processed_feature_names]
 
             plot_individual_explanation(explainer, individual_shap_values, client_processed_df, processed_feature_names, selected_client_id)
             
