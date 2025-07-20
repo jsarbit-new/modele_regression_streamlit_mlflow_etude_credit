@@ -1,0 +1,4 @@
+[server]
+# Spécifiez la version de Python à utiliser.
+# Python 3.9 est compatible avec toutes vos dépendances.
+pythonVersion = "3.12"

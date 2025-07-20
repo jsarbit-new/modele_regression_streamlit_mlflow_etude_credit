@@ -1,0 +1,49 @@
+name: Deploy Streamlit App
+
+on:
+  push:
+    branches:
+      - main  # Déclenche le workflow sur chaque push vers la branche 'main'
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.9' # À adapter si vous utilisez une autre version
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest
+
+    - name: Run tests with pytest
+      run: |
+        pytest tests/
+
+  deploy_to_streamlit:
+    needs: build_and_test # Ce job ne s'exécute que si les tests ont réussi
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Deploy to Streamlit Community Cloud
+      # Cet action est simplifiée pour le déploiement sur Streamlit Community Cloud
+      # Vous devez le connecter depuis l'interface web de Streamlit.
+      # L'URI du modèle MLflow doit être accessible publiquement, ou le modèle doit
+      # être inclus dans votre dépôt si vous n'avez pas de serveur MLflow public.
+      uses: streamlit/static-app-action@v0.1
+      with:
+        app_path: 'interface_streamlit_data_drift_shap.py' # Nom exact de votre script Streamlit
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        github_user: votre_github_username
+        github_repo: nom_de_votre_dépôt
