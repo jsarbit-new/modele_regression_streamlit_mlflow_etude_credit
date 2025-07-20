@@ -15,6 +15,7 @@ roc_curve.png
 precision_recall_curve.png
 .streamlit/secrets.toml
 
+
 # Fichiers et dossiers généraux à ignorer (bonnes pratiques)
 # Environnements virtuels
 venv/

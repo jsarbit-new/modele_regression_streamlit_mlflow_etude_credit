@@ -17,6 +17,7 @@ import gc
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+
 # --- Configuration MLflow pour le client Streamlit (Adaptée pour exécution locale) ---
 # IMPORTANT : Pour le déploiement sur Streamlit Cloud, vous devrez remettre les st.secrets
 # et configurer vos secrets dans le tableau de bord Streamlit Cloud.
@@ -58,9 +59,45 @@ try:
     if "MLFLOW_S3_ENDPOINT_URL" not in os.environ:
         os.environ["MLFLOW_S3_ENDPOINT_URL"] = f"https://s3.{AWS_REGION}.amazonaws.com"
 
+# --- Configuration MLflow pour le client Streamlit (Adaptée pour Streamlit Cloud) ---
+# Les informations sensibles ou spécifiques au déploiement sont maintenant lues depuis st.secrets
+MLFLOW_MODEL_NAME = "HomeCreditLogisticRegressionPipelineStubs" # Nom du modèle enregistré
+MLFLOW_MODEL_STAGE = "Production" # Ou "Staging", "None" pour la dernière version
+
+try:
+    # Récupérer l'URI de tracking MLflow depuis les secrets Streamlit
+    MLFLOW_TRACKING_URI = st.secrets["mlflow_tracking_uri"]
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+
+    # Récupérer les informations AWS depuis les secrets Streamlit
+    AWS_ACCESS_KEY_ID = st.secrets["aws_access_key_id"]
+    AWS_SECRET_ACCESS_KEY = st.secrets["aws_secret_access_key"]
+    AWS_REGION = st.secrets.get("aws_region", "eu-north-1") # Avec une valeur par défaut au cas où
+
+    # Explicitement définir les variables d'environnement pour boto3/MLflow via os.environ
+    # (bien que st.secrets les rende souvent disponibles, c'est une bonne pratique)
+    os.environ["AWS_ACCESS_KEY_ID"] = AWS_ACCESS_KEY_ID
+    os.environ["AWS_SECRET_ACCESS_KEY"] = AWS_SECRET_ACCESS_KEY
+    os.environ["AWS_REGION"] = AWS_REGION
+    # L'URL du endpoint S3 pour la région spécifiée
+    os.environ["MLFLOW_S3_ENDPOINT_URL"] = f"https://s3.{AWS_REGION}.amazonaws.com"
+
+    # Le bucket S3 n'est pas un secret, il peut rester en dur ou être une config
+    # Si vous voulez le rendre configurable aussi, ajoutez-le à secrets.toml
+    AWS_S3_BUCKET = "modele-regression-streamlit-mlflow-etude-credit"
+
+
     logger.info(f"MLflow tracking URI set to: {MLFLOW_TRACKING_URI}")
     logger.info(f"AWS S3 Bucket: {AWS_S3_BUCKET}, Region: {AWS_REGION}")
     
+
+except KeyError as e:
+    # Gérer spécifiquement les erreurs si un secret est manquant
+    st.error(f"Erreur de configuration : Le secret '{e}' est manquant dans `secrets.toml`. "
+             "Veuillez configurer vos secrets AWS et MLflow dans les paramètres de votre déploiement Streamlit Cloud.")
+    logger.error(f"Missing Streamlit secret: {e}", exc_info=True)
+    st.stop() # Arrête l'exécution de l'application si les secrets sont manquants
+
 except Exception as e:
     st.error(f"Erreur de configuration MLflow/AWS : {e}. Assurez-vous que l'URI de tracking et l'accès S3 sont corrects.")
     logger.error(f"MLflow configuration error: {e}", exc_info=True)
@@ -78,7 +115,11 @@ def load_application_data_stub_streamlit(num_rows=1, features_info_for_streamlit
             min_v, max_v = info["min_val"], info["max_val"]
             data[feature_name] = [np.random.rand() * (max_v - min_v) + min_v]
         elif info.get("type") == "categorical" and feature_name.startswith('app_feature_'):
+
             data[feature_name] = [np.random.choice(info.get("options", ["CategoryA", "CategoryB"]))]
+
+             data[feature_name] = [np.random.choice(info.get("options", ["CategoryA", "CategoryB"]))]
+
     
     # Ajouter des features numériques génériques supplémentaires si nécessaire (si non spécifiées dans features_info)
     # Cette logique doit être robuste pour inclure toutes les colonnes que le modèle s'attend à voir après le FE.
@@ -516,12 +557,20 @@ with st.spinner("Calcul de la prédiction..."):
                 final_input_for_model[col] = pd.to_numeric(final_input_for_model[col], errors='coerce')
             # Check if the feature is designated as categorical by features_info_for_streamlit_config
             elif col in features_info_for_streamlit and features_info_for_streamlit[col].get('type') == 'categorical':
+
                 final_input_for_model[col] = final_input_for_model[col].astype('category')
+
+                 final_input_for_model[col] = final_input_for_model[col].astype('category')
+
             # Fallback for other columns not explicitly listed in features_info_for_streamlit_config
             # but expected by the model's preprocessor.
             # This logic depends on your preprocessor. Here we assume numeric as default for other cols.
             else: 
+
                 final_input_for_model[col] = pd.to_numeric(final_input_for_model[col], errors='coerce')
+
+                 final_input_for_model[col] = pd.to_numeric(final_input_for_model[col], errors='coerce')
+
 
 
         if final_input_for_model.empty or final_input_for_model.shape[0] == 0:
@@ -591,6 +640,7 @@ if explainer is not None and shap_feature_names is not None:
                 
         st.write("Les valeurs SHAP montrent l'impact de chaque caractéristique sur la prédiction du modèle.")
             
+
         if prediction_proba is not None: # Vérifier si la prédiction a réussi avant d'afficher SHAP
             plot_individual_explanation(explainer, shap_values, shap_input_data_transformed_array, shap_feature_names, selected_client_id)
             gc.collect() # Nettoyage mémoire après le tracé SHAP
@@ -600,3 +650,24 @@ if explainer is not None and shap_feature_names is not None:
     except Exception as e:
         st.error(f"Erreur lors du calcul ou de l'affichage des valeurs SHAP : {e}")
         logger.error(f"SHAP calculation/plotting error: {e}", exc_info=True)
+
+        if prediction_proba is not None:
+            individual_shap_values = shap_values[1][0] # Pour la classe 1 (défaut), et le premier (unique) échantillon
+            
+            plot_individual_explanation(explainer, individual_shap_values, shap_input_data_transformed_array, shap_feature_names, selected_client_id)
+            
+            st.subheader("Importance Globale des Caractéristiques (Basée sur l'échantillon SHAP)")
+            plot_feature_importance(explainer, shap_values, shap_feature_names)
+
+    except Exception as e:
+        st.error(f"Une erreur est survenue lors du calcul ou de l'affichage des valeurs SHAP : {e}")
+        logger.error(f"SHAP calculation/plotting error: {e}", exc_info=True)
+else:
+    st.warning("L'explainer SHAP n'a pas pu être initialisé. Les explications ne sont pas disponibles.")
+
+st.write("---")
+
+# --- Analyse de la Dérive des Données (Data Drift) ---
+st.subheader("Analyse de la Dérive des Données (Data Drift)")
+st.info("Cette section est une place réservée. Pour une implémentation complète de l'analyse de dérive, il faudrait charger un dataset de référence (entraînement) et le comparer avec les données de production (ou ici, les données d'entrée de la démo) après l'application des mêmes fonctions de feature engineering (les stubs dans ce cas) pour obtenir des features comparables.")
+

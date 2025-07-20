@@ -20,6 +20,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # --- Configuration MLflow ---
+<<<<<<< HEAD
 # IMPORTANT : Remplacez "16.170.254.32" par l'adresse IP PUBLIQUE de votre instance EC2
 # Si votre IP change, vous devrez mettre à jour cette ligne ici ET la variable d'environnement locale.
 MLFLOW_TRACKING_URI = "http://16.170.254.32:5000"
@@ -48,11 +49,28 @@ try:
     # os.environ["AWS_SECRET_ACCESS_KEY"] = os.getenv("AWS_SECRET_ACCESS_KEY")
     # os.environ["AWS_REGION"] = AWS_REGION
     # os.environ["MLFLOW_S3_ENDPOINT_URL"] = f"https://s3.{AWS_REGION}.amazonaws.com" # Ou simplement s3://<BUCKET_NAME>
+=======
+MLFLOW_TRACKING_URI = "http://127.0.0.1:5000" # URI de votre serveur MLflow
+AWS_S3_BUCKET = "modele-regression-streamlit-mlflow-etude-credit" # Votre bucket S3
+AWS_REGION = "eu-north-1" # La région de votre bucket S3
+
+try:
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    # Configure l'accès S3 pour MLflow. C'est crucial pour l'enregistrement des artefacts.
+    os.environ["AWS_ACCESS_KEY_ID"] = os.getenv("AWS_ACCESS_KEY_ID") # Assurez-vous que ces variables sont définies dans votre environnement
+    os.environ["AWS_SECRET_ACCESS_KEY"] = os.getenv("AWS_SECRET_ACCESS_KEY")
+    os.environ["AWS_REGION"] = AWS_REGION
+    os.environ["MLFLOW_S3_ENDPOINT_URL"] = f"https://s3.{AWS_REGION}.amazonaws.com" # Point d'accès S3 spécifique à la région
+>>>>>>> f19f2d7b0059efff3b5e238d74411ad289f4909f
 
     logger.info(f"MLflow tracking URI set to: {MLFLOW_TRACKING_URI}")
     logger.info(f"AWS S3 Bucket: {AWS_S3_BUCKET}, Region: {AWS_REGION}")
 except Exception as e:
+<<<<<<< HEAD
     logger.error(f"Failed to set MLflow tracking URI: {e}")
+=======
+    logger.error(f"Failed to set MLflow tracking URI or AWS environment variables: {e}")
+>>>>>>> f19f2d7b0059efff3b5e238d74411ad289f4909f
     logger.error("MLflow tracking and S3 artifact storage might not work correctly.")
     exit(1)
 
@@ -270,7 +288,11 @@ def main_logistic_regression_pipeline(debug_mode=True, register_model=True):
         # Fallback robuste: Si features_for_streamlit est vide, utiliser toutes les features numériques
         if not features_for_streamlit and numerical_features:
             logger.warning("Aucune des features SHAP importantes spécifiées n'a été validée ou n'a été trouvée. "
+<<<<<<< HEAD
                              "Toutes les features numériques détectées seront utilisées pour Streamlit comme fallback.")
+=======
+                            "Toutes les features numériques détectées seront utilisées pour Streamlit comme fallback.")
+>>>>>>> f19f2d7b0059efff3b5e238d74411ad289f4909f
             for feat_name in numerical_features:
                 min_val = float(X[feat_name].min()) if not X[feat_name].empty and not pd.isna(X[feat_name].min()) else 0.0
                 max_val = float(X[feat_name].max()) if not X[feat_name].empty and not pd.isna(X[feat_name].max()) else 1.0
